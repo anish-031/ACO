@@ -322,6 +322,14 @@ def phase_block(st, selected):
         esc(f"Status: {_phase_status(start_ts, end_ts)}"),
     ]
     access = LIST_MODE_LINE.get(st.get("list_mode"))
+    if st.get("index") is not None:
+        lines.append(esc(f"stage index: {st.get('index')}"))
+    members = st.get("allowlist_members")
+    allocation = st.get("allowlist_allocation")
+    if members is not None or allocation is not None:
+        lines.append(esc(
+            f"allowlist: {members if members is not None else 'unknown'} wallets, "
+            f"{allocation if allocation is not None else 'unknown'} spots"))
     if access:
         lines.append(esc(access))
     if st.get("gated"):
@@ -3195,7 +3203,8 @@ def start_watcher(mid, app):
                 for _owner, _label, address, _key, wallet_qty in keep:
                     qty = int(m.get("mint_qty") or wallet_qty or 1)
                     tx, why = auth_resolver.resolve_evm_authorization(
-                        m2, address, qty, chain, read_rpc)
+                        m2, address, qty, chain, read_rpc,
+                        attempt_on_simulation_failure=bool(m.get("force")))
                     if not tx:
                         gate_lines.append(f"{wallets.mask(address)} — {why}")
                         continue
@@ -3729,8 +3738,9 @@ async def run_schedule_check(chat_id, ctx, did, msg_id=None, workflow="normal"):
                 f"{not_scheduled} ineligible or unknown wallet(s) are excluded.")
         elif workflow == "force":
             lines.append(
-                "Force Schedule bypasses local eligibility only. It still waits for the configured phase time "
-                "and requires valid wallet-specific on-chain authorization.")
+                "Force Schedule waits for the same phase open time as an eligible wallet. "
+                "It broadcasts the real phase transaction even when this wallet is not on the allowlist. "
+                "If the chain reverts, that result is reported. No public-mint substitute is used.")
         else:
             lines.append(
                 "Both uses disjoint workflows: eligible wallets go to Normal; "
@@ -3738,8 +3748,9 @@ async def run_schedule_check(chat_id, ctx, did, msg_id=None, workflow="normal"):
         lines.append(
             ("Authorization source is configured. " if status["available"] else
              "Waiting for a supported project authorization API. ")
-            + "At execution the resolver retries per wallet. It signs only complete, validated, simulated "
-            "transactions; unavailable authorization never becomes a public-mint fallback.")
+            + "At execution each wallet uses a real phase transaction. "
+            "Force still broadcasts that transaction when simulation says the wallet is not eligible. "
+            "A wallet with no phase transaction is not sent, and a public mint is never substituted.")
         lines.append("")
         for label, entries in groups:
             lines.append(f"<b>{esc(label)} ({len(entries)})</b>")
@@ -3817,9 +3828,9 @@ async def force_mint(chat_id, ctx, did, msg_id=None):
         + (f"Authorization required: {esc(auth_status['description'])}. "
            + ("A supported phase API is configured. " if auth_status["available"]
               else "Supported public eligibility/project endpoints will be checked automatically. ")
-           + "The resolver will retry per wallet; each returned transaction must pass validation and simulation. "
-           "A missing proof, signature, allocation, or transaction payload means that wallet will not be sent. "
-           "Local eligibility is separate and will not block the attempt. "
+           + "The resolver still requires a real phase transaction. "
+           "It broadcasts that transaction at confirmation even when the wallet is not eligible and simulation reverts. "
+           "A missing phase transaction is not sent, and a public mint is not substituted. "
            if gated else
            "It cannot open a sale that is not live; the contract may reject the transaction and gas can still be spent. ")
         + "\n\n"
@@ -4005,7 +4016,11 @@ async def schedule_draft(chat_id, ctx, did, msg_id=None, workflow=None):
             f"{len(chosen)} wallet(s), at {time_text}")
         lines.append(
             ", ".join(wallets.mask(address) for _owner, _label, address, _qty in chosen))
-        if gated:
+        if gated and mode == "force":
+            lines.append(
+                "force will broadcast the real phase transaction at the phase time even if the wallet is not eligible. "
+                "an allowlist revert is reported after the send. a public mint is not substituted.")
+        elif gated:
             lines.append(
                 "authorization discovery runs per wallet before/at execution; valid authorization is required and public fallback is disabled.")
         rows.append([B(f"pick wallets for #{mid}", callback_data=f"mpick:{mid}")])

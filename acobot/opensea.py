@@ -247,6 +247,9 @@ def fetch_schedule(chain, contract, *, force=False):
     try:
         slug, html = _fetch(chain, contract)
         stages = parse_stages(html) or None
+        api_stages = drop_stages(slug) if slug else None
+        if api_stages and (not stages or len(api_stages) >= len(stages)):
+            stages = api_stages
         if slug and not stages:
             log.warning("opensea page had no drop stages for %s", slug)
     except Exception as e:
@@ -288,6 +291,8 @@ def merge(chain_stages, os_stages):
             matched, **display, label=o["label"], chain_key=key,
             gated=not public, snipeable=public and key == "public",
             list_mode=list_mode, index=o.get("index"),
+            allowlist_members=o.get("allowlist_members"),
+            allowlist_allocation=o.get("allowlist_allocation"),
             source="chain+opensea" if matched else "opensea",
         ))
     used = {row.get("chain_key") for row in out if row.get("chain_key")}
@@ -396,6 +401,92 @@ def fulfill_offer(offer, seller, *, key=None, opener=None, timeout=12):
         chain_id = int(chain_id)
     return {"to": tx["to"], "data": tx.get("data") or tx.get("input_data"),
             "value": value, "chainId": chain_id}
+
+
+def drop_stages(slug, *, get=None):
+    """Official drop stages when OPENSEA_API_KEY is set. None when the key or call is unavailable."""
+    key = api_key()
+    if not key or not slug:
+        return None
+    try:
+        import httpx
+        response = (get or httpx.get)(
+            f"{API_BASE}/drops/{slug}",
+            headers={"X-API-KEY": key, "Accept": "application/json", "User-Agent": UA},
+            timeout=8,
+        )
+        if getattr(response, "status_code", 0) != 200:
+            return None
+        return stages_from_drop(response.json())
+    except Exception as exc:
+        log.info("opensea drop stages failed: %s", type(exc).__name__)
+        return None
+
+
+def stages_from_drop(body):
+    """Map an OpenSea drop payload onto the same stage records as the collection page."""
+    drop = body.get("drop") if isinstance(body, dict) and isinstance(body.get("drop"), dict) else body
+    raw_stages = drop.get("stages") if isinstance(drop, dict) else None
+    if not isinstance(raw_stages, list):
+        return None
+    found = []
+    for stage in raw_stages:
+        parsed = _drop_stage(stage)
+        if parsed:
+            found.append(parsed)
+    found.sort(key=lambda item: item["start_ts"] or 0)
+    return found or None
+
+
+def _drop_price_eth(price):
+    if isinstance(price, (int, float)) and not isinstance(price, bool):
+        return float(price)
+    if isinstance(price, str):
+        try:
+            return float(price)
+        except ValueError:
+            return None
+    if not isinstance(price, dict):
+        return None
+    token = price.get("token") if isinstance(price.get("token"), dict) else price
+    for key in ("unit", "amount", "eth", "value"):
+        raw = token.get(key) if isinstance(token, dict) else None
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _drop_stage(stage):
+    if not isinstance(stage, dict):
+        return None
+    label = stage.get("label") or stage.get("name")
+    stage_type = stage.get("stage_type") or stage.get("stageType") or stage.get("type")
+    if not isinstance(label, str) or not label or not isinstance(stage_type, str) or not stage_type:
+        return None
+    try:
+        per_wallet = int(stage["maxPerWallet"]) if stage.get("maxPerWallet") is not None else (
+            int(stage["perWalletLimit"]) if stage.get("perWalletLimit") is not None else None)
+        stage_index = int(stage["stageIndex"]) if stage.get("stageIndex") is not None else (
+            int(stage["index"]) if stage.get("index") is not None else None)
+    except (TypeError, ValueError):
+        return None
+    parsed = {
+        "label": label,
+        "type": stage_type,
+        "index": stage_index,
+        "start_ts": _iso_ts(stage.get("startTime") or stage.get("start_time")),
+        "end_ts": _iso_ts(stage.get("endTime") or stage.get("end_time")),
+        "per_wallet": per_wallet,
+        "price_eth": _drop_price_eth(stage.get("price")),
+        "allowlist_members": _optional_int(stage.get("allowlistMemberCount")),
+        "allowlist_allocation": _optional_int(stage.get("allowlistMintAllocation")),
+    }
+    parsed["list_mode"] = classify_list_mode(parsed)
+    return parsed
 
 
 def api_key():

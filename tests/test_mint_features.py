@@ -222,7 +222,7 @@ class ForceMintTests(unittest.IsolatedAsyncioTestCase):
             markup = edit.await_args.args[4]
             callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
             self.assertIn("fmconfirm:26", callbacks)
-            self.assertIn("local eligibility is separate and will not block", text.lower())
+            self.assertIn("even when the wallet is not eligible and simulation reverts", text.lower())
             self.assertIn("authorization required: requires wallet-specific merkle proof", text.lower())
             draft_checks.assert_not_awaited()
         finally:
