@@ -1,0 +1,50 @@
+# copy to config.toml (never commit real keys)
+admin_ids = [2078639025]
+whitelist_ids = []          # crew telegram user ids
+telegram_token_env = "ACO_BOT_TOKEN"   # set via environment, not here
+# Set ALCHEMY_API_KEY for ETH and Robinhood. Optional env overrides:
+# ETHEREUM_RPC_URL / ETHEREUM_RPC_BACKUP_URLS
+# ROBINHOOD_RPC_URL / ROBINHOOD_RPC_BACKUP_URLS
+# INK_RPC_URL / INK_RPC_BACKUP_URLS
+# SOLANA_RPC_URL / SOLANA_RPC_BACKUP_URLS
+# Optional: set UNISWAP_API_KEY in ~/.folk/acobot/.env for Uniswap API routing
+# on Ethereum, Robinhood mainnet, and Ink (including Ink token sells).
+# Optional: OPENSEA_API_KEY, RESERVOIR_API_KEY, and MAGICEDEN_API_KEY improve
+# drop lookup and Ethereum GTD/FCFS allowlist transaction retrieval.
+
+[chains.ethereum]
+chain_id = 1
+rpc = ["https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}", "https://ethereum-rpc.publicnode.com"]
+broadcast_rpc = ["https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}", "https://ethereum-rpc.publicnode.com"]
+ws_rpc = ["wss://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}"]
+priority_fee_gwei = 3.0      # boosted tip
+max_fee_gwei = 60.0
+gas_limit = 250000
+
+[chains.robinhood]
+chain_id = 4663
+rpc = ["https://robinhood-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}", "https://rpc.mainnet.chain.robinhood.com"]
+broadcast_rpc = ["https://robinhood-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}", "https://rpc.mainnet.chain.robinhood.com"]
+ws_rpc = ["wss://robinhood-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}"]
+priority_fee_gwei = 0.1
+max_fee_gwei = 2.0
+gas_limit = 250000
+
+[chains.ink]
+chain_id = 57073
+rpc = ["${INK_RPC_URL}", "https://rpc-gel.inkonchain.com"]
+ws_rpc = ["wss://rpc-qnd.inkonchain.com"]
+broadcast_rpc = ["${INK_RPC_URL}", "https://rpc-gel.inkonchain.com", "https://rpc-qnd.inkonchain.com"]
+priority_fee_gwei = 0.1
+max_fee_gwei = 2.0
+gas_limit = 250000
+
+[solana]
+rpc_url = "${SOLANA_RPC_URL}"
+backup_rpc_urls = []
+
+[saved_tokens]
+ethereum = [{ symbol = "USDT", contract = "0xdAC17F958D2ee523a2206206994597C13D831ec7" }]
+robinhood = []
+ink = []
+solana = [{ symbol = "SOL", contract = "native" }]
