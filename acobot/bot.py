@@ -433,7 +433,7 @@ def phase_authorization_status(draft):
         detail = "resolver will fetch and simulate wallet-specific authorization at execution time"
     elif chain_name == "ethereum":
         detail = (
-            f"missing {missing}; Reservoir and Magic Eden are checked for this wallet's "
+            f"missing {missing}; OpenSea, Reservoir, and Magic Eden are checked for this wallet's "
             "real GTD/FCFS allowlist transaction, then simulated before signing"
         )
     else:
@@ -844,7 +844,7 @@ def chain_picker_panel():
 HELP_SECTIONS = {
     "mints": ("🎯 mints", [
         "<code>/addmint 0xCONTRACT</code>  analyze a contract and schedule it",
-        "Public SeaDrop and supported simple EVM mints work from contract analysis. GTD, FCFS, and other gated phases need a real wallet-specific allowlist transaction from the project API or, on Ethereum, Reservoir and Magic Eden. Normal Schedule uses locally eligible wallets; Force Schedule bypasses local eligibility only and still waits for the phase and valid authorization. Both splits eligible and ineligible/unknown wallets into non-overlapping schedules. Force Mint Now is separate, and never substitutes a public call.",
+        "Public SeaDrop and supported simple EVM mints work from contract analysis. GTD, FCFS, and other gated phases need a real wallet-specific allowlist transaction from the project API or, on Ethereum, OpenSea, Reservoir, and Magic Eden. Normal Schedule uses locally eligible wallets; Force Schedule bypasses local eligibility only and still waits for the phase and valid authorization. Both splits eligible and ineligible/unknown wallets into non-overlapping schedules. Force Mint Now is separate, and never substitutes a public call.",
         "🎟 eligibility checks report allowlist membership only; they do not supply a Merkle proof or signed mint authorization.",
         "🎯 from sagetracer: the <b>snipe in ACO</b> button on a wallet alert opens this bot on that contract, straight into the mint analysis panel (admin only).",
         "<code>/mymints</code>  scheduled and past mints, tap to open",

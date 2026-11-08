@@ -111,7 +111,7 @@ def project_report(mint):
                                     else "automatic endpoint discovery pending"),
         "auto_retrieval": ("not required" if not gated else
                            "yes, via configured phase API" if api_configured
-                           else "will check Reservoir, Magic Eden, and supported eligibility endpoints"
+                           else "will check OpenSea Drops, then Reservoir and Magic Eden, then supported eligibility endpoints"
                            if str(mint.get("chain") or "").lower() == "ethereum"
                            else "will check supported eligibility and project endpoints"),
         "missing": missing,

@@ -285,6 +285,58 @@ def test_opensea_mode_keyless_without_key(monkeypatch):
     assert opensea.fetch_api("slug") is None
 
 
+def test_opensea_agent_key_is_cached_without_being_logged(monkeypatch, caplog):
+    monkeypatch.setattr(opensea, "api_key", lambda: "")
+    opensea._AGENT_KEY.update(value="", expires=0.0, cooldown_until=0.0)
+    calls = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {"api_key": "agent-secret-value", "expires_at": "2026-11-15T00:00:00Z"}
+
+    def post(url, headers=None, timeout=None):
+        calls.append(url)
+        return Response()
+
+    try:
+        key = opensea.ensure_api_key(post=post, now=lambda: 1_000)
+        again = opensea.ensure_api_key(post=post, now=lambda: 1_100)
+    finally:
+        opensea._AGENT_KEY.update(value="", expires=0.0, cooldown_until=0.0)
+
+    assert key == again == "agent-secret-value"
+    assert calls == ["https://api.opensea.io/api/v2/auth/keys"]
+    assert "agent-secret-value" not in caplog.text
+
+
+def test_opensea_agent_key_backs_off_when_rate_limited(monkeypatch):
+    monkeypatch.setattr(opensea, "api_key", lambda: "")
+    opensea._AGENT_KEY.update(value="", expires=0.0, cooldown_until=0.0)
+    calls = []
+
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "30"}
+
+        def json(self):
+            return {}
+
+    def post(url, headers=None, timeout=None):
+        calls.append(url)
+        return Response()
+
+    try:
+        assert opensea.ensure_api_key(post=post, now=lambda: 5_000) == ""
+        assert opensea.ensure_api_key(post=post, now=lambda: 5_010) == ""
+    finally:
+        opensea._AGENT_KEY.update(value="", expires=0.0, cooldown_until=0.0)
+
+    assert len(calls) == 1
+
+
 def test_site_mint_note_detects_site_not_contract():
     assert opensea.site_mint_note("https://opensea.io/collection/x") is None
     assert "site mint" in opensea.site_mint_note("https://digitalhuman.example/mint")

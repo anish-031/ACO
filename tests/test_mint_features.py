@@ -246,7 +246,7 @@ class ForceMintTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(results[0]["eligibility"])
         self.assertEqual(results[0]["authorization"], "required")
-        self.assertTrue(any("Reservoir and Magic Eden" in reason for reason in results[0]["reasons"]))
+        self.assertTrue(any("OpenSea, Reservoir, and Magic Eden" in reason for reason in results[0]["reasons"]))
 
     async def test_force_schedule_uses_immediate_start_time(self):
         original_drafts, original_mints = dict(bot.DRAFTS), dict(bot.MINTS)

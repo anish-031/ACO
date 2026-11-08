@@ -181,7 +181,7 @@ def test_gated_phase_report_uses_indexed_mint_api_on_ethereum():
         "schedule": [{"label": "GTD", "chain_key": "allowlist", "gated": True,
                       "list_mode": "gtd", "source": "chain", "snipeable": False}],
     }, "ethereum")
-    assert "Reservoir and Magic Eden" in report["phases"][0]["route"]
+    assert "OpenSea, Reservoir, and Magic Eden" in report["phases"][0]["route"]
     assert report["phases"][0]["list_mode"] == "gtd"
 
 

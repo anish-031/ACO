@@ -413,6 +413,83 @@ def api_key():
         return ""
 
 
+_AGENT_KEY = {"value": "", "expires": 0.0, "cooldown_until": 0.0}
+_AGENT_LOCK = __import__("threading").Lock()
+
+
+def ensure_api_key(*, post=None, now=None):
+    """Configured key, otherwise OpenSea's official free agent key.
+
+    POST /api/v2/auth/keys needs no signup. The key stays in memory until it
+    expires and is never written to disk or logs. A 429 backs off instead of
+    minting more keys.
+    """
+    configured = api_key()
+    if configured:
+        return configured
+    clock = now or time.time
+    current = clock()
+    with _AGENT_LOCK:
+        if _AGENT_KEY["value"] and _AGENT_KEY["expires"] > current + 30:
+            return _AGENT_KEY["value"]
+        if _AGENT_KEY["cooldown_until"] > current:
+            return ""
+    try:
+        import httpx
+        sender = post or httpx.post
+        response = sender(
+            f"{API_BASE}/auth/keys",
+            headers={"Accept": "application/json", "User-Agent": UA},
+            timeout=8,
+        )
+    except Exception as exc:
+        log.info("opensea agent key request failed: %s", type(exc).__name__)
+        with _AGENT_LOCK:
+            _AGENT_KEY["cooldown_until"] = clock() + 60
+        return ""
+    status = getattr(response, "status_code", 0)
+    if status == 429:
+        retry = 0
+        try:
+            retry = int(response.headers.get("Retry-After") or 0)
+        except (TypeError, ValueError, AttributeError):
+            retry = 0
+        wait = min(3600, retry or 900)
+        with _AGENT_LOCK:
+            _AGENT_KEY["cooldown_until"] = clock() + wait
+        log.info("opensea agent key rate limited for %ss", wait)
+        return ""
+    if status != 200:
+        with _AGENT_LOCK:
+            _AGENT_KEY["cooldown_until"] = clock() + 120
+        log.info("opensea agent key http %s", status)
+        return ""
+    try:
+        body = response.json()
+    except Exception:
+        return ""
+    key = str((body or {}).get("api_key") or "").strip()
+    if not key:
+        return ""
+    expires = clock() + 6 * 24 * 3600
+    raw_expiry = (body or {}).get("expires_at")
+    if isinstance(raw_expiry, str):
+        try:
+            from datetime import datetime, timezone
+            parsed = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            expires = parsed.timestamp()
+        except ValueError:
+            pass
+    with _AGENT_LOCK:
+        _AGENT_KEY["value"] = key
+        _AGENT_KEY["expires"] = expires
+        _AGENT_KEY["cooldown_until"] = 0.0
+    log.info("opensea agent key cached until %s", int(expires))
+    return key
+
+
 def mode():
     """'api key' when an official key is configured, else 'keyless (limited)'."""
     return "api key" if api_key() else "keyless mode, limited"
