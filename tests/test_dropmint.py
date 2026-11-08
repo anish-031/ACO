@@ -45,6 +45,26 @@ def test_fetch_returns_the_first_real_transaction_and_ignores_a_failed_host():
     assert seen[0][1:] == (WALLET, NFT)
 
 
+def test_opensea_drop_transaction_is_used_before_the_other_hosts():
+    seen = []
+
+    def post(url, payload):
+        seen.append((url, payload))
+        if "api.opensea.io" not in url:
+            raise AssertionError(url)
+        assert payload == {"minter": WALLET, "quantity": 1, "skip_balance_check": True}
+        return {"to": "0x" + "56" * 20, "data": "0xabcdef", "value": "1000", "chain": "ethereum"}
+
+    body, source = dropmint.fetch_authorization(
+        {"contract": NFT, "slug": "cool-cats", "phase": "allowlist"},
+        WALLET, 1, "ethereum", post=post)
+
+    assert source == "opensea"
+    assert body["transaction"]["data"] == "0xabcdef"
+    assert body["transaction"]["value"] == "1000"
+    assert len(seen) == 1
+
+
 def test_fetch_ignores_steps_that_omit_a_payment_value():
     def post(_url, _payload):
         return {"steps": [{"kind": "transaction", "items": [{

@@ -292,6 +292,25 @@ class T4(unittest.TestCase):
         self.assertEqual(m[0]["key"], "public")
         self.assertIsNone(m[0]["label"])
 
+    def test_official_drop_payload_keeps_every_phase(self):
+        stages = opensea.stages_from_drop({
+            "stages": [
+                {"label": "GTD", "stageType": "PRESALE", "stageIndex": 0,
+                 "startTime": "2026-11-08T00:00:00Z", "endTime": "2026-11-08T01:00:00Z",
+                 "maxPerWallet": 2, "price": {"token": {"unit": "0"}},
+                 "allowlistMemberCount": 100, "allowlistMintAllocation": 200},
+                {"label": "FCFS", "stageType": "PRESALE", "stageIndex": 1,
+                 "startTime": "2026-11-08T01:00:00Z", "maxPerWallet": 1,
+                 "price": "0.05", "allowlistMemberCount": 5000},
+                {"label": "Public", "stageType": "PUBLIC_SALE", "stageIndex": 2,
+                 "startTime": "2026-11-08T02:00:00Z", "maxPerWallet": 3, "price": 0},
+            ]
+        })
+        self.assertEqual([stage["list_mode"] for stage in stages], ["gtd", "fcfs", "public"])
+        self.assertEqual(stages[0]["allowlist_allocation"], 200)
+        self.assertEqual(stages[1]["price_eth"], 0.05)
+        self.assertEqual(stages[2]["index"], 2)
+
     def test_phase_block_format(self):
         st = {"label": "Reefers Whales", "chain_key": "signed", "gated": True, "price_wei": 0,
               "per_wallet": 18, "start_ts": 1793056200}

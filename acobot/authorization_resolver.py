@@ -111,7 +111,7 @@ def project_report(mint):
                                     else "automatic endpoint discovery pending"),
         "auto_retrieval": ("not required" if not gated else
                            "yes, via configured phase API" if api_configured
-                           else "will check Reservoir, Magic Eden, and supported eligibility endpoints"
+                           else "will check OpenSea Drops, then Reservoir and Magic Eden, then supported eligibility endpoints"
                            if str(mint.get("chain") or "").lower() == "ethereum"
                            else "will check supported eligibility and project endpoints"),
         "missing": missing,
@@ -227,8 +227,15 @@ def _cache_key(chain_id, contract, wallet, phase, stage_index, qty):
             phase or "", stage_index, int(qty or 1))
 
 
-def resolve_evm_authorization(mint, wallet, qty, chain, rpc, *, force_refresh=False):
-    """Resolve and simulate one wallet's gated transaction from a supported endpoint."""
+def resolve_evm_authorization(mint, wallet, qty, chain, rpc, *, force_refresh=False,
+                              attempt_on_simulation_failure=False):
+    """Resolve one wallet's gated transaction from a supported endpoint.
+
+    The transaction is simulated before it is returned. Force attempts keep a
+    validated transaction when simulation reverts, so the watcher can still
+    broadcast it. A missing or invalid transaction is never replaced with a
+    public mint.
+    """
     requirement = authorization_requirement(mint)
     if not requirement["required"]:
         return None, "phase does not require wallet-specific authorization"
@@ -264,6 +271,10 @@ def resolve_evm_authorization(mint, wallet, qty, chain, rpc, *, force_refresh=Fa
         return None, str(exc)
     simulation_error = _simulate(tx, wallet, rpc)
     if simulation_error:
+        if attempt_on_simulation_failure:
+            attempted = dict(tx)
+            attempted["simulation_warning"] = simulation_error
+            return attempted, "simulation failed; force attempt will still broadcast"
         return None, simulation_error
     expires_at = tx.get("authorization_expires_at")
     if tx.get("authorization_cacheable") and isinstance(expires_at, (int, float)):

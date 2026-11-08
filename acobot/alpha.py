@@ -140,13 +140,25 @@ def card(e, floor_native=None, usd=None):
 
 def fetch_floor(chain, ca):
     """Current floor (native) from reservoir, ethereum only. None on any failure. Cached FLOOR_TTL seconds."""
-    if chain not in RESERVOIR or not valid_ca(ca):
+    if not valid_ca(ca):
         return None
     key = (chain, ca.lower())
     hit = _floor_cache.get(key)
     now = time.time()
     if hit and now - hit[0] < FLOOR_TTL:
         return hit[1]
+    try:
+        from acobot import opensea
+        slug = opensea.cached_slug(chain, ca)
+        if slug:
+            floor = opensea.floor_stats(slug)
+            if floor is not None:
+                _floor_cache[key] = (now, floor)
+                return floor
+    except Exception:
+        pass
+    if chain not in RESERVOIR:
+        return hit[1] if hit else None
     try:
         req = urllib.request.Request(f"{RESERVOIR[chain]}/collections/v7?contract={ca}",
                                      headers={"User-Agent": UA, "Accept": "application/json"})

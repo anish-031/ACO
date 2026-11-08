@@ -9,8 +9,11 @@ telegram_token_env = "ACO_BOT_TOKEN"   # set via environment, not here
 # SOLANA_RPC_URL / SOLANA_RPC_BACKUP_URLS
 # Optional: set UNISWAP_API_KEY in ~/.folk/acobot/.env for Uniswap API routing
 # on Ethereum, Robinhood mainnet, and Ink (including Ink token sells).
-# Optional: OPENSEA_API_KEY, RESERVOIR_API_KEY, and MAGICEDEN_API_KEY improve
-# drop lookup and Ethereum GTD/FCFS allowlist transaction retrieval.
+# Optional: OPENSEA_API_KEY is used first. Without it, OpenSea's free agent
+# key endpoint is requested at runtime. Ethereum contract ABIs use Sourcify,
+# eth.blockscout.com, Routescan, and Etherscan when ETHERSCAN_API_KEY is set.
+# Ink ABIs also use explorer.inkonchain.com. Reservoir and Magic Eden EVM mint
+# routes stay as fallbacks; their hosts were down when last checked.
 
 [chains.ethereum]
 chain_id = 1

@@ -122,7 +122,7 @@ def test_rate_limited_provider_is_cooled_down_and_falls_back(monkeypatch):
     assert len(calls) == 2
 
 
-def test_unconfigured_explorers_are_not_called(monkeypatch):
+def test_public_keyless_explorers_are_used_without_an_etherscan_key(monkeypatch):
     monkeypatch.delenv("ETHERSCAN_API_KEY", raising=False)
     monkeypatch.delenv("ETHEREUM_BLOCKSCOUT_API_URL", raising=False)
     calls = []
@@ -131,6 +131,8 @@ def test_unconfigured_explorers_are_not_called(monkeypatch):
     abi_items, source, errors = manager.verified_abi(1, NFT)
 
     assert abi_items == [] and source is None
-    assert calls
-    assert all("repo.sourcify.dev" in url for url in calls)
+    assert any("repo.sourcify.dev" in url for url in calls)
+    assert any(url.startswith("https://eth.blockscout.com/api/v2/smart-contracts/") for url in calls)
+    assert any("api.routescan.io/v2/network/mainnet/evm/1/etherscan/api" in url for url in calls)
+    assert all("api.etherscan.io" not in url for url in calls)
     assert errors

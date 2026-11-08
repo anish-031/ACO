@@ -247,6 +247,9 @@ def fetch_schedule(chain, contract, *, force=False):
     try:
         slug, html = _fetch(chain, contract)
         stages = parse_stages(html) or None
+        api_stages = drop_stages(slug) if slug else None
+        if api_stages and (not stages or len(api_stages) >= len(stages)):
+            stages = api_stages
         if slug and not stages:
             log.warning("opensea page had no drop stages for %s", slug)
     except Exception as e:
@@ -288,6 +291,8 @@ def merge(chain_stages, os_stages):
             matched, **display, label=o["label"], chain_key=key,
             gated=not public, snipeable=public and key == "public",
             list_mode=list_mode, index=o.get("index"),
+            allowlist_members=o.get("allowlist_members"),
+            allowlist_allocation=o.get("allowlist_allocation"),
             source="chain+opensea" if matched else "opensea",
         ))
     used = {row.get("chain_key") for row in out if row.get("chain_key")}
@@ -398,6 +403,92 @@ def fulfill_offer(offer, seller, *, key=None, opener=None, timeout=12):
             "value": value, "chainId": chain_id}
 
 
+def drop_stages(slug, *, get=None):
+    """Official drop stages when OPENSEA_API_KEY is set. None when the key or call is unavailable."""
+    key = api_key()
+    if not key or not slug:
+        return None
+    try:
+        import httpx
+        response = (get or httpx.get)(
+            f"{API_BASE}/drops/{slug}",
+            headers={"X-API-KEY": key, "Accept": "application/json", "User-Agent": UA},
+            timeout=8,
+        )
+        if getattr(response, "status_code", 0) != 200:
+            return None
+        return stages_from_drop(response.json())
+    except Exception as exc:
+        log.info("opensea drop stages failed: %s", type(exc).__name__)
+        return None
+
+
+def stages_from_drop(body):
+    """Map an OpenSea drop payload onto the same stage records as the collection page."""
+    drop = body.get("drop") if isinstance(body, dict) and isinstance(body.get("drop"), dict) else body
+    raw_stages = drop.get("stages") if isinstance(drop, dict) else None
+    if not isinstance(raw_stages, list):
+        return None
+    found = []
+    for stage in raw_stages:
+        parsed = _drop_stage(stage)
+        if parsed:
+            found.append(parsed)
+    found.sort(key=lambda item: item["start_ts"] or 0)
+    return found or None
+
+
+def _drop_price_eth(price):
+    if isinstance(price, (int, float)) and not isinstance(price, bool):
+        return float(price)
+    if isinstance(price, str):
+        try:
+            return float(price)
+        except ValueError:
+            return None
+    if not isinstance(price, dict):
+        return None
+    token = price.get("token") if isinstance(price.get("token"), dict) else price
+    for key in ("unit", "amount", "eth", "value"):
+        raw = token.get(key) if isinstance(token, dict) else None
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _drop_stage(stage):
+    if not isinstance(stage, dict):
+        return None
+    label = stage.get("label") or stage.get("name")
+    stage_type = stage.get("stage_type") or stage.get("stageType") or stage.get("type")
+    if not isinstance(label, str) or not label or not isinstance(stage_type, str) or not stage_type:
+        return None
+    try:
+        per_wallet = int(stage["maxPerWallet"]) if stage.get("maxPerWallet") is not None else (
+            int(stage["perWalletLimit"]) if stage.get("perWalletLimit") is not None else None)
+        stage_index = int(stage["stageIndex"]) if stage.get("stageIndex") is not None else (
+            int(stage["index"]) if stage.get("index") is not None else None)
+    except (TypeError, ValueError):
+        return None
+    parsed = {
+        "label": label,
+        "type": stage_type,
+        "index": stage_index,
+        "start_ts": _iso_ts(stage.get("startTime") or stage.get("start_time")),
+        "end_ts": _iso_ts(stage.get("endTime") or stage.get("end_time")),
+        "per_wallet": per_wallet,
+        "price_eth": _drop_price_eth(stage.get("price")),
+        "allowlist_members": _optional_int(stage.get("allowlistMemberCount")),
+        "allowlist_allocation": _optional_int(stage.get("allowlistMintAllocation")),
+    }
+    parsed["list_mode"] = classify_list_mode(parsed)
+    return parsed
+
+
 def api_key():
     """OPENSEA_API_KEY env first, then config.toml [opensea] api_key. Empty string when none."""
     import os
@@ -411,6 +502,83 @@ def api_key():
             return (tomllib.load(f).get("opensea", {}) or {}).get("api_key", "").strip()
     except Exception:
         return ""
+
+
+_AGENT_KEY = {"value": "", "expires": 0.0, "cooldown_until": 0.0}
+_AGENT_LOCK = __import__("threading").Lock()
+
+
+def ensure_api_key(*, post=None, now=None):
+    """Configured key, otherwise OpenSea's official free agent key.
+
+    POST /api/v2/auth/keys needs no signup. The key stays in memory until it
+    expires and is never written to disk or logs. A 429 backs off instead of
+    minting more keys.
+    """
+    configured = api_key()
+    if configured:
+        return configured
+    clock = now or time.time
+    current = clock()
+    with _AGENT_LOCK:
+        if _AGENT_KEY["value"] and _AGENT_KEY["expires"] > current + 30:
+            return _AGENT_KEY["value"]
+        if _AGENT_KEY["cooldown_until"] > current:
+            return ""
+    try:
+        import httpx
+        sender = post or httpx.post
+        response = sender(
+            f"{API_BASE}/auth/keys",
+            headers={"Accept": "application/json", "User-Agent": UA},
+            timeout=8,
+        )
+    except Exception as exc:
+        log.info("opensea agent key request failed: %s", type(exc).__name__)
+        with _AGENT_LOCK:
+            _AGENT_KEY["cooldown_until"] = clock() + 60
+        return ""
+    status = getattr(response, "status_code", 0)
+    if status == 429:
+        retry = 0
+        try:
+            retry = int(response.headers.get("Retry-After") or 0)
+        except (TypeError, ValueError, AttributeError):
+            retry = 0
+        wait = min(3600, retry or 900)
+        with _AGENT_LOCK:
+            _AGENT_KEY["cooldown_until"] = clock() + wait
+        log.info("opensea agent key rate limited for %ss", wait)
+        return ""
+    if status != 200:
+        with _AGENT_LOCK:
+            _AGENT_KEY["cooldown_until"] = clock() + 120
+        log.info("opensea agent key http %s", status)
+        return ""
+    try:
+        body = response.json()
+    except Exception:
+        return ""
+    key = str((body or {}).get("api_key") or "").strip()
+    if not key:
+        return ""
+    expires = clock() + 6 * 24 * 3600
+    raw_expiry = (body or {}).get("expires_at")
+    if isinstance(raw_expiry, str):
+        try:
+            from datetime import datetime, timezone
+            parsed = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            expires = parsed.timestamp()
+        except ValueError:
+            pass
+    with _AGENT_LOCK:
+        _AGENT_KEY["value"] = key
+        _AGENT_KEY["expires"] = expires
+        _AGENT_KEY["cooldown_until"] = 0.0
+    log.info("opensea agent key cached until %s", int(expires))
+    return key
 
 
 def mode():

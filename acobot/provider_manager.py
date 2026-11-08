@@ -16,6 +16,12 @@ import urllib.request
 import certifi
 
 SUPPORTED_CHAIN_IDS = {"ethereum": 1, "robinhood": 4663, "ink": 57073}
+# Public, keyless hosts verified against live responses. An env URL replaces the default.
+PUBLIC_BLOCKSCOUT = {
+    "ethereum": "https://eth.blockscout.com/api/v2",
+    "ink": "https://explorer.inkonchain.com/api/v2",
+}
+ROUTESCAN_API = "https://api.routescan.io/v2/network/mainnet/evm/{chain_id}/etherscan/api"
 ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 CACHE_TTL_S = 600
 MISS_TTL_S = 30
@@ -65,12 +71,14 @@ class ProviderManager:
 
     def _providers(self, chain):
         providers = [("Sourcify", "sourcify", None)]
-        blockscout = self._configured_blockscout(chain)
+        blockscout = self._configured_blockscout(chain) or PUBLIC_BLOCKSCOUT.get(chain)
         if blockscout:
             providers.append(("Blockscout", "blockscout", blockscout))
         etherscan_key = os.environ.get("ETHERSCAN_API_KEY", "").strip()
         if chain == "ethereum" and etherscan_key:
             providers.append(("Etherscan V2", "etherscan", etherscan_key))
+        if chain == "ethereum":
+            providers.append(("Routescan", "routescan", str(SUPPORTED_CHAIN_IDS["ethereum"])))
         return providers
 
     @staticmethod
@@ -106,6 +114,12 @@ class ProviderManager:
             url = (base.format(address=address) if "{address}" in base
                    else f"{base}/smart-contracts/{address}")
             name = f"Blockscout {chain}"
+        elif kind == "routescan":
+            query = urllib.parse.urlencode({
+                "module": "contract", "action": "getabi", "address": address,
+            })
+            url = f"{ROUTESCAN_API.format(chain_id=config)}?{query}"
+            name = "Routescan"
         else:
             query = urllib.parse.urlencode({
                 "chainid": str(chain_id), "module": "contract", "action": "getabi",

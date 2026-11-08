@@ -222,7 +222,7 @@ class ForceMintTests(unittest.IsolatedAsyncioTestCase):
             markup = edit.await_args.args[4]
             callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
             self.assertIn("fmconfirm:26", callbacks)
-            self.assertIn("local eligibility is separate and will not block", text.lower())
+            self.assertIn("even when the wallet is not eligible and simulation reverts", text.lower())
             self.assertIn("authorization required: requires wallet-specific merkle proof", text.lower())
             draft_checks.assert_not_awaited()
         finally:
@@ -246,7 +246,7 @@ class ForceMintTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(results[0]["eligibility"])
         self.assertEqual(results[0]["authorization"], "required")
-        self.assertTrue(any("Reservoir and Magic Eden" in reason for reason in results[0]["reasons"]))
+        self.assertTrue(any("OpenSea, Reservoir, and Magic Eden" in reason for reason in results[0]["reasons"]))
 
     async def test_force_schedule_uses_immediate_start_time(self):
         original_drafts, original_mints = dict(bot.DRAFTS), dict(bot.MINTS)

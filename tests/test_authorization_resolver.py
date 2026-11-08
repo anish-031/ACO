@@ -247,6 +247,29 @@ def test_resolver_uses_indexed_allowlist_transaction_before_eligibility(tmp_path
     rpc.call.assert_called_once()
 
 
+def test_force_attempt_keeps_a_validated_transaction_when_simulation_reverts(tmp_path):
+    chain = config.Chain("ethereum", 1, ["rpc"], ["rpc"])
+    mint = {"contract": NFT, "phase": "allowlist", "gated": True, "force": True}
+    transaction = {"to": NFT, "data": "0x12345678", "value": 0}
+    rpc = mock.Mock()
+    rpc.call.side_effect = RuntimeError("execution reverted: not allowlisted")
+    with mock.patch.object(mintapi, "STORE", tmp_path / "mint_apis.json"), \
+            mock.patch.object(mintapi, "supports_phase", return_value=True), \
+            mock.patch.object(mintapi, "fetch_transaction", return_value=(transaction, "ok")), \
+            mock.patch.object(resolver.mint_router, "validate_api_selector"), \
+            mock.patch.object(resolver, "_AUTH_CACHE", {}):
+        blocked, blocked_reason = resolver.resolve_evm_authorization(
+            mint, WALLET, 1, chain, rpc)
+        attempted, attempt_reason = resolver.resolve_evm_authorization(
+            mint, WALLET, 1, chain, rpc, attempt_on_simulation_failure=True)
+
+    assert blocked is None
+    assert "simulation failed" in blocked_reason
+    assert attempted["data"] == "0x12345678"
+    assert "not allowlisted" in attempted["simulation_warning"]
+    assert attempt_reason == "simulation failed; force attempt will still broadcast"
+
+
 def test_resolver_rejects_public_calldata_for_gtd_and_keeps_searching(tmp_path):
     chain = config.Chain("ethereum", 1, ["rpc"], ["rpc"])
     from eth_abi import encode
