@@ -1656,13 +1656,14 @@ async def on_callback(update: Update, ctx):
             if st.get("chain_key") is None:
                 await ctx.bot.send_message(chat_id, "that phase isn't registered on this contract, so it can't be sniped. pick another.")
                 return
-            # Keep display-only OpenSea terms separate from the on-chain execution values.
+            # Select the tapped row before reading its limit, so FCFS does not keep the previous phase's quantity.
+            d["phase_idx"] = idx
             apply_mint_stage(d, st)
             d["mint_qty"] = qty_of(draft_phase_view(d))
         else:
             phases = d.get("phases") or []
             d["phase"] = phases[int(i)] if int(i) < len(phases) else (phases[0] if phases else "public")
-        d["phase_idx"] = int(i)  # single-select: this row only; all others are cleared
+            d["phase_idx"] = int(i)  # single-select: this row only; all others are cleared
         _local_wallet_report(d)
         save_drafts()
         # silent select: allowlist phases are selectable like any other; the warning lives in the phase block

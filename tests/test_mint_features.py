@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from acobot import abi, bot, config, mintread, sniper, wallets
+from acobot import abi, bot, config, mint_router, mintread, sniper, wallets
 
 
 class MintInputTests(unittest.TestCase):
@@ -986,6 +986,109 @@ class MintButtonWalkTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(self.addrs[1].lower(), record["wex"])
             self.assertEqual(record["phase"], "public")
             self.assertEqual(record["per_wallet"], 2)
+
+    async def test_fcfs_phase_keeps_one_wallet_and_does_not_use_public(self):
+        did = 14
+        fcfs_open = 1794424260  # 2026-11-11 19:11 UTC, JPEGZ FREE TO CLAIM - FCFS
+        public_open = 1794510660
+        draft = {
+            "name": "JPEGZ",
+            "contract": "0x9c0da87BbbE41A813461422E0521bC12f5386E28",
+            "chain": "ethereum",
+            "seadrop": True,
+            "mint_sig": "mintPublic(address,address,address,uint256)",
+            "mint_to": "0x00005ea00ac477b1030ce78506496e8c2de24bf5",
+            "fee_recipient": "0x0000a26b00c1f0df003000390027140000faa719",
+            "price_wei": 0,
+            "start_ts": public_open,
+            "end_ts": public_open + 86400,
+            "per_wallet": 2,
+            "phase": "signed",
+            "phase_idx": 0,
+            "mint_qty": 50,
+            "speed": "fast",
+            "gas_limit": "auto",
+            "fire_mode": "normal",
+            "wex": [],
+            "schedule": [
+                {"label": "TREASURY", "chain_key": "signed", "gated": True, "list_mode": "presale",
+                 "index": 1, "display_price_wei": 0, "display_per_wallet": 50,
+                 "display_start_ts": 1794412800, "display_end_ts": 1794413460},
+                {"label": "FREE TO CLAIM", "chain_key": "signed", "gated": True, "list_mode": "presale",
+                 "index": 2, "display_price_wei": 0, "display_per_wallet": 2,
+                 "display_start_ts": 1794413460, "display_end_ts": fcfs_open},
+                {"label": "FREE TO CLAIM - FCFS", "chain_key": "signed", "gated": True, "list_mode": "fcfs",
+                 "index": 3, "display_price_wei": 0, "display_per_wallet": 2,
+                 "display_start_ts": fcfs_open, "display_end_ts": public_open},
+                {"label": "FREE TO CLAIM - PUBLIC", "chain_key": "public", "gated": False, "list_mode": "public",
+                 "index": 0, "price_wei": 0, "per_wallet": 2, "start_ts": public_open,
+                 "display_price_wei": 0, "display_per_wallet": 2,
+                 "display_start_ts": public_open, "display_end_ts": public_open + 86400},
+            ],
+        }
+        ctx = self._ctx()
+
+        async def unknown(_contract, _chain, rows, _stage):
+            return [(row, {"eligible": None, "authorization": "unknown"}) for row in rows]
+
+        with mock.patch.dict(bot.DRAFTS, {did: draft}, clear=True), \
+                mock.patch.dict(bot.MINTS, {}, clear=True), \
+                mock.patch.object(bot, "_next_id", [1]), \
+                mock.patch.object(bot, "save_drafts"), \
+                mock.patch.object(bot, "persist"), \
+                mock.patch.object(bot, "start_watcher"), \
+                mock.patch("acobot.eligible.probe_fleet", new=unknown):
+            await self._tap(ctx, f"dph:{did}:2")
+            text, markup = self.sent[-1]
+            checked = [button.text for button in self._buttons(markup) if button.text.startswith("✅")]
+            self.assertTrue(any("FCFS" in label for label in checked))
+            self.assertFalse(any("PUBLIC" in label for label in checked))
+            self.assertFalse(any(label.startswith("✅ TREASURY") for label in checked))
+            self.assertIn("FCFS: first come, first served", text)
+            self.assertIn("2026-11-11 19:11 UTC", text)
+            self.assertEqual(draft["list_mode"], "fcfs")
+            self.assertEqual(draft["fire_mode"], "dual")
+            self.assertEqual(draft["phase"], "signed")
+            self.assertEqual(draft["mint_qty"], 2)
+            self.assertEqual(
+                [button.callback_data for button in self._buttons(markup)
+                 if button.callback_data.startswith("dq:")],
+                [f"dq:{did}:1", f"dq:{did}:2"])
+            self.assertEqual(self._actions(markup), [f"wsel:{did}", f"dsched:{did}"])
+            self._assert_telegram(markup)
+
+            await self._tap(ctx, f"wsel:{did}")
+            picker_text, picker = self.sent[-1]
+            self.assertIn(self.addrs[0], picker_text)
+            self.assertIn(self.addrs[1], picker_text)
+            await self._tap(ctx, f"wt:{did}:0")
+            self.assertEqual(draft["wex"], [self.addrs[0].lower()])
+
+            self.sent.clear()
+            await self._tap(ctx, f"dsched:{did}")
+            confirm, confirm_kb = self.sent[-1]
+            self.assertIn("gated phase schedule", confirm)
+            self.assertIn("public mint is never substituted", confirm)
+            self.assertIn("locally eligible (1)", confirm)
+            self.assertIn(f"wconfirm:{did}", [b.callback_data for b in self._buttons(confirm_kb)])
+            await self._tap(ctx, f"wconfirm:{did}")
+            record = bot.MINTS[1]
+        self.assertEqual(record["phase"], "signed")
+        self.assertEqual(record["list_mode"], "fcfs")
+        self.assertEqual(record["phase_label"], "FREE TO CLAIM - FCFS")
+        self.assertEqual(record["stage_index"], 3)
+        self.assertEqual(record["start_ts"], fcfs_open)
+        self.assertNotEqual(record["start_ts"], public_open)
+        self.assertEqual(record["per_wallet"], 2)
+        self.assertEqual(record["mint_qty"], 2)
+        self.assertTrue(record["gated"])
+        self.assertEqual(record["fire_mode"], "dual")
+        self.assertIn(self.addrs[0].lower(), record["wex"])
+        self.assertNotIn(self.addrs[1].lower(), record["wex"])
+        self.assertIn("1 wallet", self.sent[-1][0])
+        self.assertIn("public fallback is disabled", self.sent[-1][0])
+        with self.assertRaises(mint_router.MintRouteError):
+            mint_router.build_transaction(record, self.addrs[1], 2)
 
 
 if __name__ == "__main__":
