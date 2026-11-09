@@ -187,10 +187,12 @@ def remove_wallet(user_id, address):
 DECRYPT_FAILS = []  # masked addresses of saved wallets whose key no longer decrypts (last call)
 
 
-def signing_entries(user_ids, only=None, chain=None):
+def signing_entries(user_ids, only=None, chain=None, evm_any=False):
     """[(owner_id, label, address, priv_hex, qty)] for signer use only; never display.
 
     only: optional set of lowercase addresses to restrict to.
+    evm_any: a mint on one EVM chain can use a key saved under another EVM chain.
+    The address is the same on every EVM network. Solana stays separate.
     A wallet whose key cannot be decrypted is skipped (recorded in DECRYPT_FAILS), not fatal.
     """
     f = _fernet(); out = []; seen = set()
@@ -200,7 +202,8 @@ def signing_entries(user_ids, only=None, chain=None):
         for i, e in enumerate(data.get(str(uid), [])):
             entry_chain = e.get("chain", "ethereum")
             if chain is not None and not supports_chain(entry_chain, chain):
-                continue
+                if not (evm_any and entry_chain in EVM_CHAINS and chain in EVM_CHAINS):
+                    continue
             if only is not None and e["address"].lower() not in only:
                 continue
             identity = (str(uid), e["address"].lower())

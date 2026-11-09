@@ -76,6 +76,14 @@ class Wallets(unittest.TestCase):
         self.assertTrue(wallets.remove_wallet(2, a))
         self.assertEqual(wallets.list_wallets(2), [])
 
+    def test_evm_mint_can_use_a_key_saved_on_another_evm_chain(self):
+        wallets.add_wallet(3, KEY, 1, chain="ink")
+        self.assertEqual(wallets.signing_entries([3], chain="ethereum"), [])
+        found = wallets.signing_entries([3], chain="ethereum", evm_any=True)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][2].lower(), wallets.address_of(KEY).lower())
+        self.assertEqual(wallets.signing_entries([3], chain="solana", evm_any=True), [])
+
 
 class Fleet(unittest.TestCase):
     def setUp(self):

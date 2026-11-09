@@ -132,6 +132,59 @@ class MintInputTests(unittest.TestCase):
 
 
 class ForceMintTests(unittest.IsolatedAsyncioTestCase):
+    def test_mint_card_has_one_wallet_button_and_one_action(self):
+        future = int(time.time()) + 3600
+        draft = {
+            "contract": "0x" + "12" * 20,
+            "chain": "ethereum",
+            "phase": "allowlist",
+            "gated": True,
+            "start_ts": future,
+            "wallet_selected": 0,
+            "wallet_report": [],
+            "wallet_note": "0 wallets: no keys loaded. add keys in /wallets",
+        }
+        buttons = [button for row in bot.draft_kb(30, draft).inline_keyboard for button in row]
+        callbacks = [button.callback_data for button in buttons]
+        self.assertEqual(callbacks.count("wsel:30"), 1)
+        self.assertIn("dsched:30", callbacks)
+        self.assertNotIn("fsched:30", callbacks)
+        self.assertNotIn("bsched:30", callbacks)
+        self.assertEqual(sum(1 for button in buttons if "pick wallet" in button.text.lower()), 1)
+        text = bot.draft_text(draft)
+        self.assertIn("no keys loaded", text)
+        self.assertIn("Schedule mint", text)
+
+    def test_schedule_callback_is_not_the_start_time_prompt(self):
+        self.assertNotIn("dsched", {"dp", "ds", "dw", "dgc", "dmc"})
+        self.assertEqual("dsched:9".split(":", 1)[0], "dsched")
+
+    async def test_schedule_button_opens_the_schedule_flow(self):
+        draft = {
+            "contract": "0x" + "12" * 20,
+            "chain": "ethereum",
+            "phase": "public",
+            "start_ts": int(time.time()) + 3600,
+            "wallet_selected": 1,
+            "wallet_report": [{"verdict": "ok", "reasons": [], "selected": True}],
+        }
+        query = SimpleNamespace(
+            answer=mock.AsyncMock(),
+            from_user=SimpleNamespace(id=bot.ADMIN_ID, username=None),
+            data="dsched:31",
+            message=SimpleNamespace(chat_id=1, message_id=2),
+        )
+        ctx = SimpleNamespace(user_data={}, bot=SimpleNamespace(send_message=mock.AsyncMock()))
+        with mock.patch.dict(bot.DRAFTS, {31: draft}, clear=True), \
+                mock.patch.object(bot, "allowed", return_value=True), \
+                mock.patch.object(bot, "username_allowed", return_value=False), \
+                mock.patch.object(bot, "run_schedule_check", new=mock.AsyncMock()) as schedule, \
+                mock.patch.object(bot, "show_wallet_step", new=mock.AsyncMock()) as picker:
+            await bot.on_callback(SimpleNamespace(callback_query=query), ctx)
+        schedule.assert_awaited()
+        picker.assert_not_awaited()
+        self.assertIsNone(ctx.user_data.get("await"))
+
     def test_ready_public_sale_without_a_clock_offers_mint_now(self):
         draft = {
             "contract": "0x" + "12" * 20,

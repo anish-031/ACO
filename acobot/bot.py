@@ -778,11 +778,22 @@ def draft_text(d):
         lines.append("authorization is discovered and simulated per wallet before the phase opens.")
     else:
         lines.append(esc(FIRE_MODE_TEXT.get(mode, FIRE_MODE_TEXT["dual"])))
-    lines += ["", ACTION_LINE[mint_action(d)]]
+    tail = ["", ACTION_LINE[mint_action(d)]]
     safety = [str(x) for x in (d.get("safety") or []) if x and not str(x).startswith("-")]
     if safety:
-        lines += ["", "🛡 " + esc(" · ".join(safety[:3]))]
-    return "\n".join(lines)[:4000]
+        tail += ["", "🛡 " + esc(" · ".join(safety[:3]))]
+    tail += [""] + wallet_status_lines(d)
+    # Keep the wallet list and the action line. Those are what sit above the buttons.
+    kept = []
+    used = 0
+    budget = 3900 - sum(len(part) + 1 for part in tail)
+    for line in lines:
+        if used + len(line) + 1 > budget:
+            kept.append("…")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept + tail)
 
 
 def short_addr(addr):
@@ -814,35 +825,78 @@ def phase_is_live(d):
     return status == "unknown" and not view.get("start_ts") and not mint_router.is_gated(view)
 
 
+def _report_items(d):
+    report = d.get("wallet_report") or []
+    return [item for item in report if isinstance(item, dict)]
+
+
+def _chosen_verdicts(d):
+    """Verdicts for wallets that are actually selected. Old reports have no selected flag."""
+    report = _report_items(d)
+    if report and "selected" in report[0]:
+        return [item for item in report if item.get("selected")]
+    if d.get("wallet_selected"):
+        return report
+    return []
+
+
 def mint_action(d):
-    """One button for the current wallets and phase. No Normal+Force+Both row."""
-    if "wallet_report" not in d:
-        return "check"
-    if not d.get("wallet_selected"):
-        return "need_wallets"
-    blocked = any(wallet_blocks_schedule(item) for item in (d.get("wallet_report") or []))
+    """One mint button. Pick wallets is a separate button, never a second copy of this one."""
     live = phase_is_live(d)
-    if blocked:
+    chosen = _chosen_verdicts(d)
+    if chosen and any(wallet_blocks_schedule(item) for item in chosen):
         return "force_now" if live else "force"
     return "mint" if live else "schedule"
 
 
 ACTION_BUTTON = {
-    "check": ("👛 Check wallets", "wsel"),
-    "need_wallets": ("👛 Pick wallets to mint", "wsel"),
     "schedule": ("📅 Schedule mint", "dsched"),
     "force": ("🔥 Force mint", "fsched"),
     "mint": ("⚡ Mint now", "mnow"),
     "force_now": ("🔥 Force mint now", "fm"),
 }
 ACTION_LINE = {
-    "check": "👛 Check wallets to see who can mint this phase.",
-    "need_wallets": "👛 Pick at least one wallet before scheduling.",
     "schedule": "📅 Schedule mint. The selected wallets can mint, so it fires at the phase open.",
     "force": "🔥 Force mint. A selected wallet is short on balance or not eligible. It still fires at the phase open.",
     "mint": "⚡ Mint now. This phase is live and the selected wallets can mint.",
     "force_now": "🔥 Force mint now. This phase is live, and a selected wallet is not eligible.",
 }
+
+
+def wallet_status_lines(d):
+    """Who can mint. This sits at the bottom of the card, just above the buttons."""
+    report = _report_items(d)
+    if not report:
+        note = d.get("wallet_note") or "No wallet check yet. Tap Pick wallets."
+        return ["👛 " + esc(note)]
+    lines = ["👛 <b>Wallets</b>"]
+    for item in report[:8]:
+        selected = item.get("selected", True)
+        blocked = wallet_blocks_schedule(item)
+        if not selected:
+            mark, state = "⬜", "skipped"
+        elif blocked:
+            mark, state = "🔥", "force only"
+        else:
+            mark, state = "✅", "can mint"
+        balance = item.get("balance_wei")
+        balance_s = ""
+        if isinstance(balance, int) and not isinstance(balance, bool):
+            balance_s = f" · {balance / 1e18:.4f} ETH"
+        reason = ""
+        reasons = [str(reason) for reason in (item.get("reasons") or [])[:1]]
+        if blocked and reasons:
+            reason = " · " + reasons[0]
+        label = item.get("label") or "Wallet"
+        lines.append(
+            f"{mark} {esc(label)} {esc(short_addr(item.get('address')))} · {esc(state)}"
+            f"{esc(balance_s)}{esc(reason)}")
+    extra = len(report) - 8
+    if extra > 0:
+        lines.append(esc(f"… {extra} more in Pick wallets"))
+    if not d.get("wallet_selected"):
+        lines.append(esc(d.get("wallet_note") or "Pick at least one wallet."))
+    return lines
 
 
 def action_button(did, d):
@@ -871,9 +925,7 @@ def draft_kb(did, d):
                 for n, st in enumerate(stage_list)]
         for i in range(0, len(prow), 2):
             rows.append(prow[i:i + 2])
-    rows.append([action_button(did, d)])
     rows.append([B("🔄 refresh live chain data", callback_data=f"drefresh:{did}")])
-    rows.append([B("👛 pick wallets to mint", callback_data=f"wsel:{did}")])
     rows.append([B(f"🌐 chain: {d.get('chain', CHAIN_NAME)}", callback_data=f"dc:{did}")])
     # Fire mode is selected independently from phase eligibility and authorization.
     cur_mode = d.get("fire_mode", "dual")
@@ -908,6 +960,8 @@ def draft_kb(did, d):
         fills.append(B("⚙️ set mint call", callback_data=f"dmc:{did}"))
     for i in range(0, len(fills), 2):
         rows.append(fills[i:i + 2])
+    rows.append([B("👛 Pick wallets", callback_data=f"wsel:{did}")])
+    rows.append([action_button(did, d)])
     rows.append([B("🗑 discard", callback_data=f"dx:{did}")])
     return M(rows)
 
@@ -1520,7 +1574,7 @@ async def on_callback(update: Update, ctx):
             if addr in sel: sel.discard(addr)
             else: sel.add(addr)
         await show_mint_wallet_picker(chat_id, ctx, mid, q.message.message_id)
-    elif data.startswith(("dp:", "ds:", "dw:", "dgc:", "dmc:")):
+    elif data.split(":", 1)[0] in {"dp", "ds", "dw", "dgc", "dmc"}:
         if uid != ADMIN_ID:
             return
         did = int(data.split(":")[1])
@@ -1595,7 +1649,7 @@ async def on_callback(update: Update, ctx):
         await refresh_wallet_report(d)
         save_drafts()
         await _edit_panel(q, draft_text(d), draft_kb(int(did), d))
-    elif data.startswith("dfm:"):
+    elif data.split(":", 1)[0] == "dfm":
         if uid != ADMIN_ID:
             return
         _, did, mode = data.split(":")
@@ -1617,7 +1671,7 @@ async def on_callback(update: Update, ctx):
         await ctx.bot.send_message(
             chat_id,
             "The two-shot pre-fire fire mode is disabled for gated phases because authorization can be wallet- and phase-specific or expire. "
-            "The separate Both schedule option remains available: locally eligible wallets use Normal, while ineligible or unknown wallets use Force. "
+            "Use Schedule mint when the wallet can mint, or Force mint when it cannot. "
             "Authorization is still fetched and simulated per wallet before signing.",
         )
     elif data.startswith("dsp:"):
@@ -1632,7 +1686,7 @@ async def on_callback(update: Update, ctx):
         await refresh_fees(d)
         save_drafts()
         await _edit_panel(q, draft_text(d), reply_markup=draft_kb(int(did), d))
-    elif data.startswith("dg:"):
+    elif data.split(":", 1)[0] == "dg":
         if uid != ADMIN_ID:
             return
         _, did, val = data.split(":")
@@ -1643,15 +1697,19 @@ async def on_callback(update: Update, ctx):
         d["gas_limit"] = "auto" if val == "auto" else int(val)
         save_drafts()
         await _edit_panel(q, draft_text(d), reply_markup=draft_kb(int(did), d))
-    elif data.startswith("dsched:"):
+    elif data.split(":", 1)[0] == "dsched":
         if uid != ADMIN_ID:
             return
         did = int(data.split(":")[1])
+        if not await ensure_selected_wallets(chat_id, ctx, did, q.message.message_id):
+            return
         await run_schedule_check(chat_id, ctx, did, q.message.message_id)
-    elif data.startswith("fsched:"):
+    elif data.split(":", 1)[0] == "fsched":
         if uid != ADMIN_ID:
             return
         did = int(data.split(":")[1])
+        if not await ensure_selected_wallets(chat_id, ctx, did, q.message.message_id):
+            return
         await run_schedule_check(chat_id, ctx, did, q.message.message_id, workflow="force")
     elif data.startswith("bsched:"):
         if uid != ADMIN_ID:
@@ -1660,10 +1718,13 @@ async def on_callback(update: Update, ctx):
         d = DRAFTS.get(did)
         workflow = "force" if d is not None and mint_action(d) in {"force", "force_now"} else "normal"
         await run_schedule_check(chat_id, ctx, did, q.message.message_id, workflow=workflow)
-    elif data.startswith("mnow:"):
+    elif data.split(":", 1)[0] == "mnow":
         if uid != ADMIN_ID:
             return
-        await mint_now(chat_id, ctx, int(data.split(":")[1]), q.message.message_id)
+        did = int(data.split(":")[1])
+        if not await ensure_selected_wallets(chat_id, ctx, did, q.message.message_id):
+            return
+        await mint_now(chat_id, ctx, did, q.message.message_id)
     elif data.startswith("mnowgo:"):
         if uid != ADMIN_ID:
             return
@@ -1681,10 +1742,13 @@ async def on_callback(update: Update, ctx):
             d.pop("force_pending_until", None)
             save_drafts()
             await _edit_panel(q, draft_text(d), draft_kb(did, d))
-    elif data.startswith("fm:"):
+    elif data.split(":", 1)[0] == "fm":
         if uid != ADMIN_ID:
             return
-        await force_mint(chat_id, ctx, int(data[3:]), q.message.message_id)
+        did = int(data.split(":", 1)[1])
+        if not await ensure_selected_wallets(chat_id, ctx, did, q.message.message_id):
+            return
+        await force_mint(chat_id, ctx, did, q.message.message_id)
     elif data.startswith("wt:"):
         if uid != ADMIN_ID:
             return
@@ -3721,10 +3785,14 @@ async def show_wallets(chat_id, ctx, uid, msg_id=None):
 
 
 def mint_wallets(d):
-    """[(owner, label, address, qty)] for signers on this draft's chain. Owners: admin + whitelist."""
-    owners = [ADMIN_ID] + list(CFG.whitelist_ids)
+    """[(owner, label, address, qty)] for signers on this draft's chain. Owners: admin + whitelist.
+
+    An EVM key saved under ethereum, robinhood, or ink can mint on any of those chains.
+    """
+    owners = [ADMIN_ID] + list(getattr(CFG, "whitelist_ids", []) or [])
     chain = d.get("chain", CHAIN_NAME)
-    return [(o, lbl, a, q) for o, lbl, a, _k, q in wallets.signing_entries(owners, chain=chain)]
+    return [(o, lbl, a, q) for o, lbl, a, _k, q in wallets.signing_entries(
+        owners, chain=chain, evm_any=True)]
 
 
 async def _draft_checks(d, selected_only=True):
@@ -3764,16 +3832,34 @@ async def _draft_checks(d, selected_only=True):
 
 
 async def refresh_wallet_report(d):
-    """Store which selected wallets can mint. A failed read does not mark them ineligible."""
+    """Store which wallets can mint. A failed read does not mark them ineligible."""
+    note = ""
     try:
-        allw, verdicts = await _draft_checks(d)
+        allw, verdicts = await _draft_checks(d, selected_only=False)
     except Exception as exc:
         log.warning("wallet report failed: %s", type(exc).__name__)
         allw, verdicts = [], []
-    excluded = {a.lower() for a in d.get("wex") or []}
+        note = "Wallet check failed. Tap refresh and try again."
+    excluded = {str(a).lower() for a in d.get("wex") or []}
+    clean = []
+    for verdict in verdicts:
+        if not isinstance(verdict, dict):
+            continue
+        verdict["selected"] = str(verdict.get("address") or "").lower() not in excluded
+        clean.append(verdict)
+    selected = sum(1 for item in clean if item.get("selected"))
+    if not note and not allw:
+        try:
+            owners = [ADMIN_ID] + list(getattr(CFG, "whitelist_ids", []) or [])
+            note = zero_send_reason(owners, d.get("chain", CHAIN_NAME), excluded, 0) or "No wallets on this chain."
+        except Exception:
+            note = "No wallets on this chain. Add one in /wallets."
+    elif not note and not selected:
+        note = "Every wallet is skipped. Tap Pick wallets and turn one on."
     d["wallet_count"] = len(allw)
-    d["wallet_selected"] = sum(1 for _owner, _label, address, _qty in allw if address.lower() not in excluded)
-    d["wallet_report"] = verdicts
+    d["wallet_selected"] = selected
+    d["wallet_report"] = clean
+    d["wallet_note"] = note
     return d
 
 
@@ -3836,18 +3922,53 @@ async def show_mint_wallet_picker(chat_id, ctx, mid, msg_id=None):
         elif chosen:
             state = "⚠️ status unavailable"
         lines.append(f"{'✅' if chosen else '⬜'} {esc(label)} {esc(wallets.mask(addr))}: {esc(state)}")
-        rows.append([B(f"{'✅' if chosen else '⬜'} {label} {wallets.mask(addr)}", callback_data=f"mpick:{mid}:{a}")])
+        rows.append([B(clip_button(f"{'✅' if chosen else '⬜'} {label} {short_addr(addr)}"), callback_data=f"mpick:{mid}:{a}")])
     rows.append([B("save selection", callback_data=f"mpick:{mid}:save"), B("back to my mints", callback_data="m:list")])
     await _edit_or_send(None, chat_id, msg_id, "\n".join(lines), M(rows), ctx)
 
 
+async def ensure_selected_wallets(chat_id, ctx, did, msg_id):
+    """Schedule and mint need at least one wallet. Otherwise open the picker instead of crashing."""
+    d = DRAFTS.get(did)
+    if d is None:
+        await ctx.bot.send_message(chat_id, "that draft is gone.")
+        return False
+    if not d.get("wallet_selected"):
+        try:
+            await refresh_wallet_report(d)
+            save_drafts()
+        except Exception:
+            log.exception("wallet refresh before mint action failed")
+    if not d.get("wallet_selected"):
+        await show_wallet_step(chat_id, ctx, did, msg_id)
+        return False
+    return True
+
+
 async def show_wallet_step(chat_id, ctx, did, msg_id=None):
+    try:
+        await _show_wallet_step(chat_id, ctx, did, msg_id)
+    except Exception:
+        log.exception("wallet picker failed")
+        try:
+            await ctx.bot.send_message(
+                chat_id,
+                "The wallet list could not be opened. Tap Pick wallets again, or send the contract once more.",
+                reply_markup=M([[B("back", callback_data=f"wback:{did}")]]))
+        except Exception:
+            log.exception("wallet picker fallback failed")
+
+
+async def _show_wallet_step(chat_id, ctx, did, msg_id=None):
     d = DRAFTS.get(did)
     if d is None:
         await ctx.bot.send_message(chat_id, "that draft is gone.")
         return
     await refresh_wallet_report(d)
-    save_drafts()
+    try:
+        save_drafts()
+    except Exception:
+        log.exception("could not save the draft while opening wallets")
     view = draft_phase_view(d)
     allw = mint_wallets(d)
     by_address = {str(item.get("address", "")).lower(): item for item in (d.get("wallet_report") or [])}
@@ -3857,24 +3978,25 @@ async def show_wallet_step(chat_id, ctx, did, msg_id=None):
         "",
     ]
     if not allw:
-        lines.append("No wallets on this chain yet. Add one in /wallets first.")
-    excluded = {a.lower() for a in d.get("wex") or []}
+        lines.append(esc(d.get("wallet_note") or "No wallets on this chain yet. Add one in /wallets first."))
+    excluded = {str(a).lower() for a in d.get("wex") or []}
     rows = []
     for i, (_owner, label, address, qty) in enumerate(allw):
-        selected = address.lower() not in excluded
-        verdict = by_address.get(address.lower()) or {}
+        addr = str(address or "")
+        selected = addr.lower() not in excluded
+        verdict = by_address.get(addr.lower()) or {}
         state = "can mint" if selected and not wallet_blocks_schedule(verdict) else (
             "skipped" if not selected else "force only")
         reason = "; ".join(str(item) for item in (verdict.get("reasons") or [])[:2])
         balance = verdict.get("balance_wei")
-        balance_s = f"{balance / 1e18:.4f} ETH" if isinstance(balance, int) else "balance unread"
+        balance_s = f"{balance / 1e18:.4f} ETH" if isinstance(balance, int) and not isinstance(balance, bool) else "balance unread"
         lines.append(
             f"{'✅' if selected else '⬜'} <b>{esc(label)}</b> · {esc(state)} · {esc(balance_s)} · x{qty}")
-        lines.append(f"<code>{esc(address)}</code>")
+        lines.append(f"<code>{esc(addr)}</code>")
         if reason and selected:
             lines.append(esc(reason))
         rows.append([B(
-            clip_button(f"{'✅' if selected else '⬜'} {label} {short_addr(address)}"),
+            clip_button(f"{'✅' if selected else '⬜'} {label} {short_addr(addr)}"),
             callback_data=f"wt:{did}:{i}")])
     lines += ["", ACTION_LINE[mint_action(d)]]
     rows.append([B("all wallets", callback_data=f"wall:{did}")])
@@ -3994,7 +4116,7 @@ async def run_schedule_check(chat_id, ctx, did, msg_id=None, workflow="normal"):
     rows = []
     for i, (_o, label, addr, _q) in enumerate(allw):
         mark = "⬜" if addr.lower() in {x.lower() for x in d.get("wex") or []} else "✅"
-        rows.append([B(f"{mark} {label} {wallets.mask(addr)}", callback_data=f"wt:{did}:{i}")])
+        rows.append([B(clip_button(f"{mark} {label} {short_addr(addr)}"), callback_data=f"wt:{did}:{i}")])
     issues = any(v.get("reasons") or v.get("verdict") in ("warn", "fail") for v in verdicts)
     callback = f"wconfirm:{did}" if workflow == "normal" else f"wconfirm:{did}:{workflow}"
     rows.append([
