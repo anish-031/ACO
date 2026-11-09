@@ -163,10 +163,11 @@ class T4(unittest.TestCase):
         text = bot.draft_text(draft)
         for label in ("Team &amp; Treasury", "GTD (CCFF00", "WL/FCFS", "PUBLIC: 0 Goats left"):
             self.assertIn(label, text)
-        self.assertEqual(text.count("Status:"), 4)
-        self.assertIn("MP: FREE | Limit: 500 per wallet", text)
-        self.assertIn("MP: 0.002 ETH | Limit: 20 per wallet", text)
-        self.assertIn("Ends: 2026-11-03 18:00 UTC", text)
+        self.assertIn("500/wallet", text)
+        self.assertIn("20/wallet", text)
+        self.assertIn("Free", text)
+        self.assertIn("0.002 ETH", text)
+        self.assertIn("closes 2026-11-03 18:00 UTC", text)
         self.assertIn("GMT+5:45", text)
         self.assertTrue(all(st["gated"] and not st["snipeable"] for st in schedule[:3]))
         self.assertTrue(schedule[-1]["snipeable"])
@@ -209,17 +210,16 @@ class T4(unittest.TestCase):
         self.assertFalse(bot.draft_phase_snipeable(draft))
 
         text = bot.draft_text(draft)
-        self.assertIn("selected phase: <b>GTD (CCFF00", text)
-        self.assertIn("drop-page terms are display metadata; mint transaction comes from chain data or the official phase API", text)
+        self.assertIn("<b>GTD (CCFF00", text)
         self.assertIn("phase authorization: required", text)
         self.assertIn("missing wallet-specific Merkle proof, phase mint parameters", text)
         self.assertIn("quantity/cost: unavailable until the phase returns valid wallet authorization", text)
-        self.assertIn("price: <b>free</b>", text)
-        self.assertIn("per wallet: 2 per wallet", text)
-        self.assertIn("opens: <b>2026-11-02 12:30 UTC", text)
-        self.assertIn("mode: Normal only", text)
+        self.assertIn("💰 Free", text)
+        self.assertIn("2 per wallet", text)
+        self.assertIn("opens <b>2026-11-02 12:30 UTC", text)
+        self.assertIn("Normal only", text)
         self.assertIn("GTD: guaranteed allowlist spot", text)
-        self.assertIn("discovered and simulated per wallet before/at execution", text)
+        self.assertIn("discovered and simulated per wallet before the phase opens", text)
 
         markup = bot.draft_kb(4, draft)
         buttons = [button for row in markup.inline_keyboard for button in row]
@@ -300,10 +300,10 @@ class T4(unittest.TestCase):
             "usd_per_eth": 2000,
         }
         text = bot.draft_text(draft)
-        pre = text.split("<pre>", 1)[1].split("</pre>", 1)[0]
-        self.assertIn("&gt; ⚡ Fast", pre)
-        self.assertNotIn(">", pre)
-        self.assertNotIn("<", pre)
+        self.assertIn("⚡", text)
+        self.assertNotIn("<pre>", text)
+        self.assertNotIn("&gt;", text)
+        self.assertNotIn(">", text.split("<b>")[0])
 
     def test_phase_statuses(self):
         now = int(time.time())

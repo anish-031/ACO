@@ -626,169 +626,154 @@ FIRE_MODE_TEXT = {
 FIRE_MODE_NAME = {"prefire": "Pre-fire only", "normal": "Normal only", "dual": "Both (default)"}
 
 
-def draft_text(d):
-    """Telegram HTML panel."""
-    d = draft_phase_view(d)
-    selected_stage = d.get("_selected_stage")
-    chain = d.get("chain", CHAIN_NAME)
-    price = d.get("price_wei")
+def _wei_label(value):
     try:
-        price_num = None if price is None else int(price)
+        amount = None if value is None else int(value)
     except (TypeError, ValueError):
-        price_num = None
-    price_s = "free" if price_num == 0 else (f"{price_num / 1e18:g} ETH" if price_num is not None else "not detected")
-    start, end = d.get("start_ts"), d.get("end_ts")
-    opens = fmt_ts(start) if start else "not detected"
-    closes = fmt_ts(end) if end else "no end set"
-    per = d.get("per_wallet")
-    per_s = f"{per} per wallet" if per else "not detected"
-    if d.get("seadrop") and per is None:
-        per_s = "unlimited / 0 from live SeaDrop config" if d.get("onchain_read_ts") else "not detected"
+        return "not set"
+    if amount is None:
+        return "not set"
+    if amount == 0:
+        return "Free"
+    text = f"{amount / 1e18:.6f}".rstrip("0").rstrip(".")
+    return f"{text} ETH"
+
+
+def _status_mark(start_ts, end_ts):
+    return {
+        "upcoming": "🟡 Upcoming",
+        "live": "🟢 Live",
+        "ended": "🔴 Ended",
+    }.get(_phase_status(start_ts, end_ts), "⚪ Unknown")
+
+
+def _panel_phases(d):
+    schedule = d.get("schedule")
+    if schedule:
+        return schedule
     phases = d.get("phases") or []
-    phase_now = d.get("phase") or ("public" if d.get("seadrop") else (phases[0] if phases else "single phase"))
-    gas = d.get("gas_limit", "auto")
-    gas_kind, gas_n = _gas_view(gas)
-    if gas_kind == "auto":
-        gas_s = GAS_LABEL["auto"]
-    elif gas_kind == "high":
-        gas_s = GAS_LABEL["high"]
-    elif gas_n is None:
-        gas_s = GAS_LABEL["custom"]
-    else:
-        gas_s = f"{GAS_LABEL['custom']} ({gas_n:,} gas)"
+    if d.get("stages") or len(phases) > 1:
+        return d.get("stages") or [{"key": p, "label": _phase_label(p), "chain_key": p} for p in phases]
+    return []
+
+
+def _phase_summary(st, selected):
+    name = st.get("label") or _phase_label(st.get("chain_key") or st.get("key") or "phase")
+    price = st.get("display_price_wei")
+    if price is None:
+        price = st.get("price_wei")
+    per = st.get("display_per_wallet")
+    if per is None:
+        per = st.get("per_wallet")
+    start_ts = st.get("display_start_ts") or st.get("start_ts")
+    end_ts = st.get("display_end_ts") or st.get("end_ts")
+    mark = "✅" if selected else "•"
+    bits = [_wei_label(price)]
+    if per:
+        bits.append(f"{per}/wallet")
+    elif st.get("gated"):
+        bits.append("allowlist")
+    bits.append(_status_mark(start_ts, end_ts).split(" ", 1)[-1])
+    return f"{mark} {name} · " + " · ".join(bits)
+
+
+def draft_text(d):
+    """Short Telegram card. Schedule buttons sit directly under this text."""
+    d = draft_phase_view(d)
+    stage = d.get("_selected_stage") or {}
+    chain = d.get("chain", CHAIN_NAME)
     name = esc(d.get("name") or "unnamed contract")
-    status = []
-    if d.get("paused") is not None:
-        status.append("paused" if d["paused"] else "not paused")
-    if d.get("sale_started") is not None:
-        status.append("sale live now" if d["sale_started"] else "sale not live yet")
-    ident_lines = []
-    if d.get("symbol"):
-        ident_lines.append(f"symbol: {esc(d['symbol'])}")
-    if d.get("standard"):
-        ident_lines.append(f"standard: {esc(d['standard'].upper())}")
-    if d.get("owner"):
-        ident_lines.append(f"owner: <code>{esc(d['owner'])}</code>")
+    standard = str(d.get("standard") or "").upper()
+    protocol = "SeaDrop" if d.get("seadrop") else (d.get("protocol") or d.get("source") or "contract")
+    meta = " · ".join(part for part in (str(chain), standard, str(protocol)) if part)
+    price = _wei_label(d.get("price_wei"))
+    per = d.get("per_wallet")
+    per_s = f"{per} per wallet" if per else "not set"
+    if d.get("seadrop") and per is None:
+        per_s = "not set on chain"
+    start_ts = d.get("start_ts")
+    end_ts = d.get("end_ts")
+    phase_name = stage.get("label") or _phase_label(stage.get("chain_key") or d.get("phase") or "phase")
     lines = [
         f"🎯 <b>{name}</b>",
+        esc(meta),
         f"<code>{esc(d.get('contract') or '')}</code>",
-        f"🌐 chain: {esc(chain)}   📦 source: {esc(d.get('source', 'bytecode'))}",
-    ]
-    if d.get("abi_source"):
-        lines.append(f"verified ABI: {esc(d['abi_source'])}")
-    lines += ident_lines
-    read_ts = d.get("onchain_read_ts")
-    read_label = datetime.fromtimestamp(read_ts, UTC).strftime("%Y-%m-%d %H:%M:%S UTC") if read_ts else "not read"
-    lines += [
         "",
-        "<b>💰 MINT DETAILS</b>",
-        f"on-chain snapshot: {esc(read_label)}",
-        "refresh before scheduling; snapshot is not a live subscription",
+        "✅ <b>Selected phase</b>",
+        f"<b>{esc(phase_name)}</b>",
+        f"💰 {esc(price)}   👛 {esc(per_s)}",
+        f"🕒 opens <b>{esc(fmt_ts(start_ts) if start_ts else 'not set')}</b>",
     ]
-    if selected_stage:
-        lines.append(f"selected phase: <b>{esc(selected_stage.get('label') or _phase_label(selected_stage.get('chain_key') or 'phase'))}</b>")
-        lines.append("drop-page terms are display metadata; mint transaction comes from chain data or the official phase API")
+    if start_ts:
+        lines.append(esc(_when(start_ts)))
+    if end_ts:
+        lines.append(f"🏁 closes {esc(fmt_ts(end_ts))}")
+    lines.append(esc(_status_mark(start_ts, end_ts)))
+    access = LIST_MODE_LINE.get(stage.get("list_mode") or d.get("list_mode"))
+    if access:
+        lines.append(esc(access))
+    supply, minted = fmt_count(d.get("max_supply")), fmt_count(d.get("minted"))
+    if d.get("max_supply") is not None or d.get("minted") is not None:
+        lines.append(f"📦 {esc(minted)} minted / {esc(supply)} supply")
+    if stage.get("gated") or d.get("gated"):
+        lines.append("⚠️ Allowlist phase. The bot still fires at the open time.")
     auth_status = phase_authorization_status(d)
-    report = auth_resolver.project_report(d)
-    lines += [
-        "",
-        "<b>PROJECT / AUTHORIZATION CHECK</b>",
-        f"network / standard / protocol: {esc(report['network'])} / {esc(report['standard'])} / {esc(report['protocol'])}",
-        f"official site: {esc(report['official_site'])}",
-        f"phases: {esc(', '.join(report['phases']) if report['phases'] else 'not detected')}",
-        f"selected: {esc(report['selected_phase'])} · price: {esc('unknown' if report['price_wei'] is None else price_s)} · wallet limit: {esc(report['wallet_limit'] if report['wallet_limit'] is not None else 'unknown')}",
-        f"eligibility: {esc(report['eligibility'])}",
-        f"authorization: {esc(report['authorization_type'])} · {esc(report['authorization_available'])}",
-        f"auto retrieval: {esc(report['auto_retrieval'])}",
-        f"normal schedule: {'ready' if report['schedule_possible'] else 'needs a phase opening time or on-chain live-sale signal'} · force schedule: {'available' if report['transaction_construction_possible'] or auth_status['required'] else 'needs a supported transaction route'}",
-        ("Normal uses locally eligible wallets; Force bypasses local eligibility only; Both splits eligible and ineligible/unknown wallets into separate, non-overlapping schedules. "
-         "All schedules wait for the configured phase time; Force Mint Now is separate."
-         if auth_status["required"] else
-         "Public phases have no local eligibility gate; Both avoids duplicate public mints."),
-        "missing parameters: " + esc(", ".join(report["missing"]) if report["missing"] else "none detected"),
-    ]
-    site_inspection = d.get("site_inspection") or {}
-    candidates = site_inspection.get("api_candidates") or []
-    if candidates:
-        lines.append("site API routes found (inspection only): " + esc(", ".join(candidates[:5])))
-        lines.append("unknown routes are not called until a project-specific adapter validates their request/response format")
     if auth_status["required"]:
-        lines.append("phase authorization: required — " + esc(auth_status["detail"]))
-    lines += [
-        f"price: <b>{esc(price_s)}</b>",
-        f"per wallet: {esc(per_s)}",
-        f"supply: {fmt_count(d.get('max_supply'))}",
-        f"minted: {fmt_count(d.get('minted'))}",
-        f"floor: {esc(str(d.get('floor_live') or 'live market data unavailable'))}",
-        "",
-    ]
-    if draft_phase_authorized(d):
         lines += [
-            "<b>🔢 QUANTITY</b>",
-            esc(qty_limit_line(d)),
-            f"each wallet mints: <b>{qty_of(d)}</b>",
-            ("cost: supplied by the phase authorization API at fire time" if mint_router.is_gated(d)
-             else esc(cost_line(d))),
+            "🔐 phase authorization: required",
+            esc(auth_status["detail"]),
         ]
-    elif mint_router.is_gated(d):
-        lines.append("quantity/cost: unavailable until the phase returns valid wallet authorization")
-    lines += [
-        "",
-        "<b>🕒 WINDOW (UTC)</b>",
-        f"opens: <b>{esc(opens)}</b>",
-        f"closes: {esc(closes)}",
-    ]
-    if status:
-        lines.append("status: " + esc(", ".join(status)))
-    sched = d.get("schedule")
-    if sched:
-        lines += ["", "<b>♻️ PHASES</b>"]
-        sel_i = _selected_index(d, [(st.get("chain_key"),) for st in sched])
-        for n, st in enumerate(sched):
-            sel = n == sel_i and st.get("chain_key") is not None
-            lines += [""] + phase_block(st, sel)
-    elif d.get("stages") or len(phases) > 1:
-        lines += ["", "<b>♻️ PHASES</b>"]
-        stage_list = d.get("stages") or [{"key": p} for p in phases]
-        sel_i = _selected_index(d, [(st.get("key"),) for st in stage_list])
-        for n, st in enumerate(stage_list):
-            key = st.get("key")
-            lines += [""] + phase_block(dict(st, chain_key=key, label=_phase_label(key)), n == sel_i)
+        if not draft_phase_authorized(d):
+            lines.append("quantity/cost: unavailable until the phase returns valid wallet authorization")
+    elif draft_phase_authorized(d):
+        lines.append(f"🔢 qty <b>{qty_of(d)}</b> · {esc(cost_line(d))}")
+    phases = _panel_phases(d)
+    if phases:
+        lines += ["", "🗂 <b>All phases</b>"]
+        selected = _selected_index(d, [(st.get("chain_key") or st.get("key"),) for st in phases])
+        for n, st in enumerate(phases[:8]):
+            lines.append(esc(_phase_summary(st, n == selected)))
+        if len(phases) > 8:
+            lines.append(esc(f"… {len(phases) - 8} more phases"))
+    elif d.get("phase"):
+        lines += ["", f"🗂 {esc(_phase_label(d.get('phase')))}"]
     if d.get("schedule_unavailable"):
-        lines += ["", esc("schedule unavailable (couldn't read the drop page). Showing on-chain phases only.")]
-    if not sched and not (d.get("stages") or len(phases) > 1):
-        lines += ["", "<b>♻️ PHASES</b>", f"single phase: {esc(_phase_label(phase_now))}"]
+        lines.append(esc("schedule unavailable (couldn't read the drop page). Showing on-chain phases only."))
     if d.get("mint_sig"):
-        lines += ["", "<b>⚙️ MINT CALL</b>", f"<code>{esc(d['mint_sig'])}</code>"]
+        lines += ["", f"⚙️ <code>{esc(d['mint_sig'])}</code>"]
     else:
-        lines += [
-            "",
-            "<b>⚙️ MINT CALL</b>",
-            "not detected. tap ⚙️ set mint call and send the function signature (e.g. mint(uint256)).",
-            "or ask me to dig this project to find the real mint contract.",
-        ]
+        lines += ["", "⚙️ Mint call not detected. Use set mint call, for example mint(uint256)."]
     if d.get("fee_recipient"):
-        lines.append(f"fee recipient: <code>{esc(d['fee_recipient'])}</code>")
-    lines += ["", "<b>⛽ GAS</b>", f"limit: {esc(gas_s)}"]
-    hint_key = gas_kind if gas_kind in GAS_HINT else "custom"
-    lines.append("<i>" + esc(GAS_HINT[hint_key]) + "</i>")
-    # Telegram HTML rejects a bare ">" (the selected-speed marker) inside <pre>.
-    lines.append("<pre>" + esc("\n".join(fee_block(d))) + "</pre>")
-    if d.get("speed") == "superfast":
-        lines.append("🚀 super fast: top tier, no gas cap. it spends what it takes to land in the first block.")
-    fm = d.get("fire_mode", "dual")
-    lines.append("<b>🔥 mode: " + esc(FIRE_MODE_NAME.get(fm, FIRE_MODE_NAME["dual"])) + "</b>")
+        lines.append(f"💸 fee <code>{esc(d['fee_recipient'])}</code>")
+    speed = d.get("speed", "fast") if d.get("speed") in SPEED_EMOJI else "fast"
+    gas_kind, _gas_n = _gas_view(d.get("gas_limit", "auto"))
+    gas_s = GAS_LABEL.get(gas_kind, GAS_LABEL["custom"])
+    cost = "estimate unavailable"
+    fees = d.get("fees") if isinstance(d.get("fees"), dict) else {}
+    row = (fees.get("rows") or {}).get(speed) if isinstance(fees.get("rows"), dict) else None
+    if isinstance(row, dict) and "cost_eth" in row:
+        try:
+            cost = fee_cost_s(d, row["cost_eth"])
+        except (TypeError, ValueError):
+            cost = "estimate unavailable"
+    lines.append(f"⛽ {SPEED_EMOJI[speed]} {esc(gas_s)} · {esc(cost)}")
+    mode = d.get("fire_mode", "dual")
+    lines.append(f"🔥 <b>{esc(FIRE_MODE_NAME.get(mode, FIRE_MODE_NAME['dual']))}</b>")
     if mint_router.is_gated(d):
-        lines.append(
-            "authorization is discovered and simulated per wallet before/at execution; firing waits for the selected phase boundary.")
+        lines.append("authorization is discovered and simulated per wallet before the phase opens.")
     else:
-        lines.append(esc(FIRE_MODE_TEXT.get(fm, FIRE_MODE_TEXT["dual"])))
-    if d.get("safety"):
-        lines += ["", "<b>🛡 SAFETY</b>"] + [esc(x) for x in d["safety"]]
-    lines.append("~ estimate from similar mints, exact at fire time")
-    for n in d.get("notes", []):
-        lines.append("⚠️ " + esc(n))
-    return "\n".join(lines)
+        lines.append(esc(FIRE_MODE_TEXT.get(mode, FIRE_MODE_TEXT["dual"])))
+    lines += [
+        "",
+        "📅 <b>Schedule</b>",
+        "Normal fires eligible wallets at the phase open.",
+        "Force still sends the real phase transaction at that time.",
+        "Both splits eligible and other wallets into two schedules.",
+    ]
+    safety = [str(x) for x in (d.get("safety") or []) if x and not str(x).startswith("-")]
+    if safety:
+        lines += ["", "🛡 " + esc(" · ".join(safety[:3]))]
+    return "\n".join(lines)[:4000]
 
 
 def draft_kb(did, d):
@@ -813,6 +798,20 @@ def draft_kb(did, d):
                 for n, st in enumerate(stage_list)]
         for i in range(0, len(prow), 2):
             rows.append(prow[i:i + 2])
+    phase_view = draft_phase_view(d)
+    gated = mint_router.is_gated(phase_view)
+    force_ready = gated or (
+        not gated and d.get("price_wei") is not None
+        and (d.get("mint_sig") or d.get("seadrop"))
+    )
+    rows.append([
+        B("📅 NORMAL SCHEDULE", callback_data=f"dsched:{did}"),
+        B("🔥 FORCE SCHEDULE", callback_data=f"fsched:{did}"),
+    ])
+    rows.append([
+        B("🔀 Both schedules", callback_data=f"bsched:{did}"),
+        *( [B("⚡ FORCE MINT NOW", callback_data=f"fm:{did}")] if force_ready else [] ),
+    ])
     rows.append([B("🔄 refresh live chain data", callback_data=f"drefresh:{did}")])
     rows.append([B("👛 pick wallets to mint", callback_data=f"wsel:{did}")])
     rows.append([B(f"🌐 chain: {d.get('chain', CHAIN_NAME)}", callback_data=f"dc:{did}")])
@@ -848,19 +847,6 @@ def draft_kb(did, d):
         fills.append(B("⚙️ set mint call", callback_data=f"dmc:{did}"))
     for i in range(0, len(fills), 2):
         rows.append(fills[i:i + 2])
-    phase_view = draft_phase_view(d)
-    gated = mint_router.is_gated(phase_view)
-    force_ready = gated or (
-        not gated and d.get("price_wei") is not None
-        and (d.get("mint_sig") or d.get("seadrop"))
-    )
-    rows.append([
-        B("📅 NORMAL SCHEDULE", callback_data=f"dsched:{did}"),
-        B("🔥 FORCE SCHEDULE", callback_data=f"fsched:{did}"),
-        B("🔀 Both schedules", callback_data=f"bsched:{did}"),
-    ])
-    if force_ready:
-        rows.append([B("⚡ FORCE MINT NOW", callback_data=f"fm:{did}")])
     rows.append([B("🗑 discard", callback_data=f"dx:{did}")])
     return M(rows)
 
@@ -879,14 +865,34 @@ async def refresh_fees(d):
         d["usd_per_eth"] = None
 
 
+def plain_panel(text):
+    """Readable text when Telegram rejects the HTML card. Tags are removed, not shown."""
+    cleaned = re.sub(r"<[^>]+>", "", html.unescape(str(text or "")))
+    return cleaned[:3900]
+
+
+async def send_panel(bot, chat_id, text, reply_markup=None):
+    """Send a mint card with its buttons. A rejected HTML card is resent as plain text."""
+    try:
+        return await bot.send_message(chat_id, text[:4000], reply_markup=reply_markup)
+    except BadRequest as exc:
+        log.warning("panel HTML rejected: %s", exc)
+        return await bot.send_message(chat_id, plain_panel(text), reply_markup=reply_markup)
+
+
 async def _edit_panel(q, text, reply_markup=None):
     """Edit the tapped panel in place. Re-tapping the current selection sends the same text,
     which Telegram rejects as 'not modified'. That is not an error."""
     try:
-        await q.edit_message_text(text, reply_markup=reply_markup)
+        await q.edit_message_text(text[:4000], reply_markup=reply_markup)
     except BadRequest as e:
-        if "not modified" not in str(e).lower():
-            raise
+        if "not modified" in str(e).lower():
+            return
+        try:
+            await q.edit_message_text(plain_panel(text), reply_markup=reply_markup)
+        except BadRequest as retry:
+            if "not modified" not in str(retry).lower():
+                raise
 
 
 async def _edit_or_send(update_or_ctx, chat_id, msg_id, text, kb, ctx):
@@ -1338,15 +1344,7 @@ async def start_draft(chat_id, ctx, contract, chain_name=None):
         await ctx.bot.send_message(
             chat_id, "the contract was read, but the panel failed to render. send /start and try again.")
         return
-    try:
-        await ctx.bot.send_message(chat_id, panel, reply_markup=markup)
-    except BadRequest as exc:
-        log.warning("mint panel rejected: %s", exc)
-        try:
-            await ctx.bot.send_message(chat_id, esc(panel)[:3900])
-        except BadRequest:
-            await ctx.bot.send_message(
-                chat_id, "the contract was read, but Telegram refused the panel. send /start and try again.")
+    await send_panel(ctx.bot, chat_id, panel, markup)
     if not d.get("mint_sig") and not d.get("seadrop"):
         await ctx.bot.send_message(chat_id, "no mint call found on this contract. want me to dig the web for the real mint contract? say dig and the project name.")
 
@@ -3144,7 +3142,7 @@ async def on_text(update: Update, ctx):
     ctx.user_data.pop("await", None)
     save_drafts()
     await refresh_fees(d)
-    await update.message.reply_text(draft_text(d), reply_markup=draft_kb(arg, d))
+    await send_panel(ctx.bot, update.effective_chat.id, draft_text(d), draft_kb(arg, d))
 
 
 
