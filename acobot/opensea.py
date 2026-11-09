@@ -8,6 +8,7 @@ Chain data stays the source of truth for execution. This module only enriches la
 the schedule display. Any failure returns None and the caller keeps chain stages.
 """
 import json, re, time, logging, urllib.request, urllib.error
+from html import unescape as html_unescape
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -60,6 +61,45 @@ def _optional_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+_WALLET_LIMIT_KEYS = (
+    "perWalletLimit", "maxTotalMintableByWallet", "maxPerWallet", "maxMintsPerWallet",
+    "per_wallet_limit", "max_total_mintable_by_wallet", "max_per_wallet",
+)
+
+
+def _wallet_limit(stage):
+    """Wallet cap from whichever field this OpenSea payload uses."""
+    if not isinstance(stage, dict):
+        return None
+    for key in _WALLET_LIMIT_KEYS:
+        limit = _optional_int(stage.get(key))
+        if limit is not None and limit > 0:
+            return limit
+    return None
+
+
+def _nearby_drop_counts(html, array_start):
+    window = html[max(0, array_start - 500):array_start]
+    supply = re.search(r'"maxSupply"\s*:\s*(\d+)', window)
+    minted = re.search(r'"totalSupply"\s*:\s*(\d+)', window)
+    return (int(supply.group(1)) if supply else None,
+            int(minted.group(1)) if minted else None)
+
+
+def visible_wallet_limits(html):
+    """Limits printed on the mint schedule when the JSON stage omits them."""
+    found = {}
+    for match in re.finditer(r'font-medium">([^<]{1,80})</span>', html or ""):
+        label = html_unescape(match.group(1)).strip()
+        if not label or label.lower() in {"allowlist", "public", "presale"} or "limit" in label.lower():
+            continue
+        window = html[match.end():match.end() + 900]
+        limit = re.search(r"Limit\s+(\d+)\s+per wallet", window, re.I)
+        if limit:
+            found[label] = int(limit.group(1))
+    return found
 
 
 def classify_list_mode(stage):
@@ -129,21 +169,26 @@ def parse_stages(html):
         if not isinstance(stages, list):
             continue
         stage_arrays += 1
+        drop_supply, drop_minted = _nearby_drop_counts(html, array_start)
         found = []
         for stage in stages:
             label = stage.get("label") or stage.get("name") if isinstance(stage, dict) else None
             stage_type = stage.get("stageType") or stage.get("type") if isinstance(stage, dict) else None
             if not isinstance(stage, dict) or not label or not stage_type:
                 continue
-            start_ts = _iso_ts(stage.get("startTime"))
-            end_ts = _iso_ts(stage.get("endTime"))
+            start_ts = _iso_ts(stage.get("startTime") or stage.get("start_time"))
+            end_ts = _iso_ts(stage.get("endTime") or stage.get("end_time"))
+            if start_ts is None:
+                start_ts = _optional_int(stage.get("startTime") or stage.get("start_time"))
+            if end_ts is None:
+                end_ts = _optional_int(stage.get("endTime") or stage.get("end_time"))
             price = stage.get("price")
             token = price.get("token") if isinstance(price, dict) else None
             unit = token.get("unit") if isinstance(token, dict) else None
             try:
-                price_eth = float(unit) if unit is not None else None
-                per_wallet = int(stage["perWalletLimit"]) if stage.get("perWalletLimit") is not None else None
-                stage_index = int(stage["stageIndex"]) if stage.get("stageIndex") is not None else None
+                price_eth = float(unit) if unit is not None else _drop_price_eth(price)
+                stage_index = int(stage["stageIndex"]) if stage.get("stageIndex") is not None else (
+                    int(stage["index"]) if stage.get("index") is not None else None)
             except (TypeError, ValueError):
                 log.warning("opensea stage has invalid numeric fields")
                 continue
@@ -153,20 +198,40 @@ def parse_stages(html):
                 "index": stage_index,
                 "start_ts": start_ts,
                 "end_ts": end_ts,
-                "per_wallet": per_wallet,
+                "per_wallet": _wallet_limit(stage),
                 "price_eth": price_eth,
+                "drop_supply": drop_supply,
+                "drop_minted": drop_minted,
                 "allowlist_members": _optional_int(stage.get("allowlistMemberCount")),
                 "allowlist_allocation": _optional_int(stage.get("allowlistMintAllocation")),
             }
             parsed["list_mode"] = classify_list_mode(parsed)
             found.append(parsed)
-        if len(found) > len(out):
+        if _stage_list_score(found) > _stage_list_score(out):
             out = found
+    for label, limit in visible_wallet_limits(html).items():
+        for stage in out:
+            if stage.get("per_wallet") is None and stage.get("label") == label:
+                stage["per_wallet"] = limit
     marker_found = '"stages":[{"label"' in html
     log.info("opensea stages parse html_chars=%d marker_found=%s arrays=%d matched=%d",
              len(html), marker_found, stage_arrays, len(out))
     out.sort(key=lambda s: s["start_ts"] or 0)
     return out
+
+
+def _stage_list_score(stages):
+    """Prefer the stage list that actually carries wallet limits and windows."""
+    score = 0
+    for stage in stages or []:
+        score += 1
+        if stage.get("per_wallet") is not None:
+            score += 5
+        if stage.get("start_ts"):
+            score += 1
+        if stage.get("price_eth") is not None:
+            score += 1
+    return score
 
 
 def _slug_for(chain, contract):
@@ -234,6 +299,28 @@ def _fetch(chain, contract):
     return slug, html
 
 
+def _combine_stage_lists(page_stages, api_stages):
+    """Keep wallet limits and windows when one source has the names and the other has the numbers."""
+    if not api_stages:
+        return page_stages
+    if not page_stages:
+        return api_stages
+    page_by_index = {stage.get("index"): stage for stage in page_stages if stage.get("index") is not None}
+    page_by_label = {stage.get("label"): stage for stage in page_stages if stage.get("label")}
+    combined = []
+    for stage in api_stages:
+        previous = page_by_index.get(stage.get("index")) or page_by_label.get(stage.get("label")) or {}
+        merged = dict(previous)
+        for key, value in stage.items():
+            if value is not None:
+                merged[key] = value
+        for key in ("per_wallet", "start_ts", "end_ts", "price_eth", "drop_supply", "drop_minted"):
+            if merged.get(key) is None and previous.get(key) is not None:
+                merged[key] = previous[key]
+        combined.append(merged)
+    return combined or page_stages
+
+
 def fetch_schedule(chain, contract, *, force=False):
     """Cached OpenSea stage list for a SeaDrop collection. None when unavailable."""
     _load()
@@ -248,8 +335,7 @@ def fetch_schedule(chain, contract, *, force=False):
         slug, html = _fetch(chain, contract)
         stages = parse_stages(html) or None
         api_stages = drop_stages(slug) if slug else None
-        if api_stages and (not stages or len(api_stages) >= len(stages)):
-            stages = api_stages
+        stages = _combine_stage_lists(stages, api_stages)
         if slug and not stages:
             log.warning("opensea page had no drop stages for %s", slug)
     except Exception as e:
@@ -293,6 +379,8 @@ def merge(chain_stages, os_stages):
             list_mode=list_mode, index=o.get("index"),
             allowlist_members=o.get("allowlist_members"),
             allowlist_allocation=o.get("allowlist_allocation"),
+            drop_supply=o.get("drop_supply"),
+            drop_minted=o.get("drop_minted"),
             source="chain+opensea" if matched else "opensea",
         ))
     used = {row.get("chain_key") for row in out if row.get("chain_key")}
@@ -468,12 +556,11 @@ def _drop_stage(stage):
     if not isinstance(label, str) or not label or not isinstance(stage_type, str) or not stage_type:
         return None
     try:
-        per_wallet = int(stage["maxPerWallet"]) if stage.get("maxPerWallet") is not None else (
-            int(stage["perWalletLimit"]) if stage.get("perWalletLimit") is not None else None)
         stage_index = int(stage["stageIndex"]) if stage.get("stageIndex") is not None else (
             int(stage["index"]) if stage.get("index") is not None else None)
     except (TypeError, ValueError):
         return None
+    per_wallet = _wallet_limit(stage)
     parsed = {
         "label": label,
         "type": stage_type,

@@ -47,6 +47,36 @@ class T4(unittest.TestCase):
         self.assertEqual(st[0]["start_ts"], 1793620800)
         self.assertEqual(st[-1]["end_ts"], 1793728800)
 
+    def test_wallet_limit_uses_max_total_and_visible_schedule_text(self):
+        html = (
+            '"dropBySlug":{"maxSupply":11111,"totalSupply":0,"stages":['
+            '{"label":"TREASURY","stageType":"SIGNED_PRESALE","stageIndex":1,'
+            '"startTime":"2026-11-11T16:00:00.000Z","endTime":"2026-11-11T16:11:00.000Z",'
+            '"maxTotalMintableByWallet":50,"price":{"token":{"unit":0}}},'
+            '{"label":"FREE TO CLAIM - FCFS","stageType":"SIGNED_PRESALE","stageIndex":3,'
+            '"startTime":"2026-11-11T19:11:00.000Z","endTime":"2026-11-12T19:11:00.000Z",'
+            '"price":{"token":{"unit":0}}}]}}'
+            '<span class="font-medium">FREE TO CLAIM - FCFS</span>'
+            '<span>Free | Limit 2 per wallet</span>'
+        )
+        stages = opensea.parse_stages(html)
+        self.assertEqual([stage["per_wallet"] for stage in stages], [50, 2])
+        self.assertEqual(stages[0]["drop_supply"], 11111)
+        self.assertEqual(stages[0]["drop_minted"], 0)
+        self.assertEqual(stages[1]["start_ts"], 1794424260)
+
+    def test_richer_stage_list_wins_when_both_have_the_same_count(self):
+        thin = (
+            '"stages":[{"label":"TREASURY","stageType":"SIGNED_PRESALE","stageIndex":1,'
+            '"startTime":"2026-11-11T16:00:00.000Z","price":{"token":{"unit":0}}}]'
+        )
+        rich = (
+            '"stages":[{"label":"TREASURY","stageType":"SIGNED_PRESALE","stageIndex":1,'
+            '"startTime":"2026-11-11T16:00:00.000Z","perWalletLimit":50,"price":{"token":{"unit":0}}}]'
+        )
+        self.assertEqual(opensea.parse_stages(thin + rich)[0]["per_wallet"], 50)
+        self.assertEqual(opensea.parse_stages(rich + thin)[0]["per_wallet"], 50)
+
     def test_parse_chooses_complete_stages_array_when_page_has_multiple(self):
         partial = (
             '{"dropBySlug":{"stages":[{"label":"Public only","stageType":"PUBLIC_SALE",'
@@ -163,11 +193,11 @@ class T4(unittest.TestCase):
         text = bot.draft_text(draft)
         for label in ("Team &amp; Treasury", "GTD (CCFF00", "WL/FCFS", "PUBLIC: 0 Goats left"):
             self.assertIn(label, text)
-        self.assertIn("500/wallet", text)
-        self.assertIn("20/wallet", text)
-        self.assertIn("Free", text)
+        self.assertIn("500 per wallet", text)
+        self.assertIn("20 per wallet", text)
+        self.assertIn("Mint price: Free", text)
         self.assertIn("0.002 ETH", text)
-        self.assertIn("closes 2026-11-03 18:00 UTC", text)
+        self.assertIn("Closes: 2026-11-03 18:00 UTC", text)
         self.assertIn("GMT+5:45", text)
         self.assertTrue(all(st["gated"] and not st["snipeable"] for st in schedule[:3]))
         self.assertTrue(schedule[-1]["snipeable"])
@@ -214,9 +244,9 @@ class T4(unittest.TestCase):
         self.assertIn("phase authorization: required", text)
         self.assertIn("missing wallet-specific Merkle proof, phase mint parameters", text)
         self.assertIn("quantity/cost: unavailable until the phase returns valid wallet authorization", text)
-        self.assertIn("💰 Free", text)
-        self.assertIn("2 per wallet", text)
-        self.assertIn("opens <b>2026-11-02 12:30 UTC", text)
+        self.assertIn("Mint price: Free", text)
+        self.assertIn("Limit: 2 per wallet", text)
+        self.assertIn("Opens: 2026-11-02 12:30 UTC", text)
         self.assertIn("Normal only", text)
         self.assertIn("GTD: guaranteed allowlist spot", text)
         self.assertIn("discovered and simulated per wallet before the phase opens", text)
@@ -275,7 +305,7 @@ class T4(unittest.TestCase):
             "gas_limit": "auto",
         }
         text = bot.draft_text(draft)
-        self.assertIn("schedule unavailable (couldn&#x27;t read the drop page)", text)
+        self.assertIn("schedule unavailable (couldn't read the drop page)", text)
         self.assertIn("public", text)
         self.assertIn("allowlist", text)
 

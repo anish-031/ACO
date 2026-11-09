@@ -364,7 +364,8 @@ def fmt_ts(ts):
 
 
 def esc(x):
-    return html.escape(str(x))
+    # Apostrophes are valid in Telegram HTML. Escaping them to &#x27; leaves a bare &.
+    return html.escape(str(x), quote=False)
 
 
 BUTTON_TEXT_LIMIT = 64
@@ -605,8 +606,9 @@ def cost_line(d):
 
 
 def qty_rows(did, d):
-    cap = min(qty_cap(d), QTY_NO_LIMIT_CAP)
-    cur = min(qty_of(d), cap)
+    full = qty_cap(d)
+    cap = min(full, QTY_NO_LIMIT_CAP)
+    cur = qty_of(d)
     rows, row = [], []
     for n in range(1, cap + 1):
         row.append(B(("✅" if n == cur else "") + str(n), callback_data=f"dq:{did}:{n}"))
@@ -614,6 +616,8 @@ def qty_rows(did, d):
             rows.append(row); row = []
     if row:
         rows.append(row)
+    if full > cap:
+        rows.append([B(("✅" if cur == full else "") + str(full), callback_data=f"dq:{did}:{full}")])
     return rows
 
 
@@ -657,28 +661,53 @@ def _panel_phases(d):
     return []
 
 
-def _phase_summary(st, selected):
-    name = st.get("label") or _phase_label(st.get("chain_key") or st.get("key") or "phase")
-    price = st.get("display_price_wei")
-    if price is None:
-        price = st.get("price_wei")
-    per = st.get("display_per_wallet")
-    if per is None:
-        per = st.get("per_wallet")
-    start_ts = st.get("display_start_ts") or st.get("start_ts")
-    end_ts = st.get("display_end_ts") or st.get("end_ts")
-    mark = "✅" if selected else "•"
-    bits = [_wei_label(price)]
+def _stage_field(st, display_key, chain_key):
+    if display_key in st and st.get(display_key) is not None:
+        return st.get(display_key)
+    return st.get(chain_key)
+
+
+def _limit_label(per):
     if per:
-        bits.append(f"{per}/wallet")
+        return f"{per} per wallet"
+    return "not listed"
+
+
+def phase_card_lines(st, selected, supply=None):
+    """Full mint terms for one phase. Every phase on the card uses this, not only the selected one."""
+    name = st.get("label") or _phase_label(st.get("chain_key") or st.get("key") or "phase")
+    price = _stage_field(st, "display_price_wei", "price_wei")
+    per = _stage_field(st, "display_per_wallet", "per_wallet")
+    start_ts = _stage_field(st, "display_start_ts", "start_ts")
+    end_ts = _stage_field(st, "display_end_ts", "end_ts")
+    mark = "✅" if selected else "▫️"
+    lines = [f"{mark} <b>{esc(name)}</b>"]
+    access = LIST_MODE_LINE.get(st.get("list_mode"))
+    if access:
+        lines.append(esc(access))
     elif st.get("gated"):
-        bits.append("allowlist")
-    bits.append(_status_mark(start_ts, end_ts).split(" ", 1)[-1])
-    return f"{mark} {name} · " + " · ".join(bits)
+        lines.append("Allowlist")
+    if st.get("index") is not None:
+        lines.append(esc(f"stage {st.get('index')}"))
+    lines += [
+        f"💰 Mint price: {esc(_wei_label(price))}",
+        f"👛 Limit: {esc(_limit_label(per))}",
+        f"🕒 Opens: {esc(fmt_ts(start_ts) if start_ts else 'not listed')}",
+    ]
+    if start_ts:
+        lines.append(esc(_when(start_ts)))
+    lines.append(f"🏁 Closes: {esc(fmt_ts(end_ts) if end_ts else 'no end listed')}")
+    lines.append(esc(_status_mark(start_ts, end_ts)))
+    phase_supply = st.get("drop_supply")
+    if phase_supply is None:
+        phase_supply = supply
+    if phase_supply is not None:
+        lines.append(f"📦 Supply: {esc(fmt_count(phase_supply))}")
+    return lines
 
 
 def draft_text(d):
-    """Short Telegram card. Schedule buttons sit directly under this text."""
+    """Mint card with every phase's price, limit, window, and supply."""
     d = draft_phase_view(d)
     stage = d.get("_selected_stage") or {}
     chain = d.get("chain", CHAIN_NAME)
@@ -686,37 +715,35 @@ def draft_text(d):
     standard = str(d.get("standard") or "").upper()
     protocol = "SeaDrop" if d.get("seadrop") else (d.get("protocol") or d.get("source") or "contract")
     meta = " · ".join(part for part in (str(chain), standard, str(protocol)) if part)
-    price = _wei_label(d.get("price_wei"))
-    per = d.get("per_wallet")
-    per_s = f"{per} per wallet" if per else "not set"
-    if d.get("seadrop") and per is None:
-        per_s = "not set on chain"
-    start_ts = d.get("start_ts")
-    end_ts = d.get("end_ts")
-    phase_name = stage.get("label") or _phase_label(stage.get("chain_key") or d.get("phase") or "phase")
+    supply = d.get("max_supply")
+    if supply is None:
+        supply = stage.get("drop_supply")
+    minted = d.get("minted")
+    if minted is None:
+        minted = stage.get("drop_minted")
     lines = [
         f"🎯 <b>{name}</b>",
         esc(meta),
         f"<code>{esc(d.get('contract') or '')}</code>",
-        "",
-        "✅ <b>Selected phase</b>",
-        f"<b>{esc(phase_name)}</b>",
-        f"💰 {esc(price)}   👛 {esc(per_s)}",
-        f"🕒 opens <b>{esc(fmt_ts(start_ts) if start_ts else 'not set')}</b>",
     ]
-    if start_ts:
-        lines.append(esc(_when(start_ts)))
-    if end_ts:
-        lines.append(f"🏁 closes {esc(fmt_ts(end_ts))}")
-    lines.append(esc(_status_mark(start_ts, end_ts)))
-    access = LIST_MODE_LINE.get(stage.get("list_mode") or d.get("list_mode"))
-    if access:
-        lines.append(esc(access))
-    supply, minted = fmt_count(d.get("max_supply")), fmt_count(d.get("minted"))
-    if d.get("max_supply") is not None or d.get("minted") is not None:
-        lines.append(f"📦 {esc(minted)} minted / {esc(supply)} supply")
+    if minted is not None or supply is not None:
+        lines.append(f"📦 Minted: {esc(fmt_count(minted))} · Total supply: {esc(fmt_count(supply))}")
+    phases = _panel_phases(d)
+    if phases:
+        lines += ["", "🗂 <b>All phases</b>"]
+        selected = _selected_index(d, [(st.get("chain_key") or st.get("key"),) for st in phases])
+        for n, st in enumerate(phases[:8]):
+            lines += [""] + phase_card_lines(st, n == selected, supply)
+        if len(phases) > 8:
+            lines.append(esc(f"… {len(phases) - 8} more phases"))
+    elif d.get("phase"):
+        lines += ["", f"🗂 {esc(_phase_label(d.get('phase')))}"]
+    if d.get("schedule_unavailable"):
+        lines.append(esc("schedule unavailable (couldn't read the drop page). Showing on-chain phases only."))
+    phase_name = stage.get("label") or _phase_label(stage.get("chain_key") or d.get("phase") or "phase")
+    lines += ["", f"✅ Scheduling <b>{esc(phase_name)}</b>"]
     if stage.get("gated") or d.get("gated"):
-        lines.append("⚠️ Allowlist phase. The bot still fires at the open time.")
+        lines.append("⚠️ Allowlist phase. The bot still fires at this phase's open time.")
     auth_status = phase_authorization_status(d)
     if auth_status["required"]:
         lines += [
@@ -727,18 +754,6 @@ def draft_text(d):
             lines.append("quantity/cost: unavailable until the phase returns valid wallet authorization")
     elif draft_phase_authorized(d):
         lines.append(f"🔢 qty <b>{qty_of(d)}</b> · {esc(cost_line(d))}")
-    phases = _panel_phases(d)
-    if phases:
-        lines += ["", "🗂 <b>All phases</b>"]
-        selected = _selected_index(d, [(st.get("chain_key") or st.get("key"),) for st in phases])
-        for n, st in enumerate(phases[:8]):
-            lines.append(esc(_phase_summary(st, n == selected)))
-        if len(phases) > 8:
-            lines.append(esc(f"… {len(phases) - 8} more phases"))
-    elif d.get("phase"):
-        lines += ["", f"🗂 {esc(_phase_label(d.get('phase')))}"]
-    if d.get("schedule_unavailable"):
-        lines.append(esc("schedule unavailable (couldn't read the drop page). Showing on-chain phases only."))
     if d.get("mint_sig"):
         lines += ["", f"⚙️ <code>{esc(d['mint_sig'])}</code>"]
     else:
@@ -841,7 +856,8 @@ def draft_kb(did, d):
             fills.append(B("💰 set price", callback_data=f"dp:{did}"))
         if not d.get("start_ts"):
             fills.append(B("🕒 set start", callback_data=f"ds:{did}"))
-        if not d.get("per_wallet"):
+        phase_limit = _stage_field(selected_stage or {}, "display_per_wallet", "per_wallet")
+        if phase_limit is None and not d.get("per_wallet"):
             fills.append(B("👛 set per-wallet", callback_data=f"dw:{did}"))
     if not d.get("mint_sig") and not d.get("seadrop"):
         fills.append(B("⚙️ set mint call", callback_data=f"dmc:{did}"))
@@ -1505,6 +1521,7 @@ async def on_callback(update: Update, ctx):
                 return
             # Keep display-only OpenSea terms separate from the on-chain execution values.
             apply_mint_stage(d, st)
+            d["mint_qty"] = qty_of(draft_phase_view(d))
         else:
             phases = d.get("phases") or []
             d["phase"] = phases[int(i)] if int(i) < len(phases) else (phases[0] if phases else "public")

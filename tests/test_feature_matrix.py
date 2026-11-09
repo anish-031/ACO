@@ -114,7 +114,7 @@ class FeatureMatrixTests(unittest.TestCase):
                     self.assertLessEqual(len(button.text), bot.BUTTON_TEXT_LIMIT, button.text)
                     self.assertLessEqual(len((button.callback_data or "").encode()), 64, button.callback_data)
                 qty = [b for b in buttons if b.callback_data and b.callback_data.startswith("dq:")]
-                self.assertLessEqual(len(qty), bot.QTY_NO_LIMIT_CAP)
+                self.assertLessEqual(len(qty), bot.QTY_NO_LIMIT_CAP + 1)
 
     def test_fee_block_and_clocks_do_not_raise(self):
         for n in range(10):
