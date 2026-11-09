@@ -370,6 +370,7 @@ def esc(x):
 
 BUTTON_TEXT_LIMIT = 64
 WALLET_CHECK_TIMEOUT = 6
+ELIGIBILITY_PROBE_TIMEOUT = 4
 
 
 def clip_button(text, limit=BUTTON_TEXT_LIMIT):
@@ -1628,7 +1629,7 @@ async def on_callback(update: Update, ctx):
             return
         _, did, i = data.split(":")
         d = DRAFTS.get(int(did))
-        if d is None or not d.get("phases"):
+        if d is None or not (d.get("schedule") or d.get("phases")):
             await ctx.bot.send_message(chat_id, "that draft expired. send the contract again to rebuild it.")
             return
         sched = d.get("schedule")
@@ -3958,15 +3959,22 @@ async def _split_by_local_eligibility(draft, entries):
     }
     wallet_rows = [{"label": label, "address": address}
                    for _owner, label, address, _qty in entries]
-    results = await eligibility.probe_fleet(
-        view.get("contract"), view.get("chain", CHAIN_NAME), wallet_rows, stage)
+    try:
+        results = await asyncio.wait_for(
+            eligibility.probe_fleet(
+                view.get("contract"), view.get("chain", CHAIN_NAME), wallet_rows, stage),
+            timeout=ELIGIBILITY_PROBE_TIMEOUT)
+    except Exception as exc:
+        log.warning("eligibility probe skipped: %s", type(exc).__name__)
+        return list(entries), [], {}
     result_by_address = {
         wallet["address"].lower(): result
         for wallet, result in results
     }
+    # Unknown is not a miss. Only an explicit allowlist "no" leaves the normal schedule.
     normal_entries = [
         entry for entry in entries
-        if (result_by_address.get(entry[2].lower()) or {}).get("eligible") is True
+        if (result_by_address.get(entry[2].lower()) or {}).get("eligible") is not False
     ]
     force_entries = [entry for entry in entries if entry not in normal_entries]
     return normal_entries, force_entries, result_by_address
@@ -4074,11 +4082,26 @@ async def _show_wallet_step(chat_id, ctx, did, msg_id=None):
     await _edit_or_send(None, chat_id, msg_id, text, markup, ctx)
 
 
+async def _preflight_or_skip(d):
+    """Balance check with a deadline. A slow RPC still leaves the confirm button up."""
+    try:
+        return await asyncio.wait_for(_draft_checks(d), timeout=WALLET_CHECK_TIMEOUT)
+    except Exception as exc:
+        log.warning("wallet preflight skipped: %s", type(exc).__name__)
+        allw = mint_wallets(d)
+        verdicts = [{
+            "label": label, "address": address, "masked": wallets.mask(address),
+            "verdict": "warn",
+            "reasons": ["balance check is slow. you can still confirm."],
+        } for _owner, label, address, _qty in allw]
+        return allw, verdicts
+
+
 async def run_check(chat_id, ctx, did, msg_id=None):
     d = DRAFTS.get(did)
     if d is None:
         return
-    _allw, verdicts = await _draft_checks(d)
+    _allw, verdicts = await _preflight_or_skip(d)
     text = "\n".join(panels.check_lines(verdicts, d.get("price_wei") or 0))
     kb = M([[B("back to wallets", callback_data=f"wsel:{did}"), B("schedule pre-flight", callback_data=f"wgo:{did}")]])
     await _edit_or_send(None, chat_id, msg_id, text, kb, ctx)
@@ -4128,20 +4151,19 @@ async def run_schedule_check(chat_id, ctx, did, msg_id=None, workflow="normal"):
         groups = [(label, entries) for label, entries in groups if entries]
         if not groups:
             text = (
-                "<b>⛔ no locally eligible wallets</b>\n\n"
-                "Normal Schedule will not queue an ineligible or unknown wallet. "
-                "Use Force Schedule to attempt the selected wallets at the configured phase time, "
-                "or Both to put them in the Force workflow."
+                "<b>⛔ explicit allowlist miss</b>\n\n"
+                "Every selected wallet got an explicit allowlist no, so Normal Schedule will not queue them. "
+                "Force mint still fires those wallets at the phase open."
             )
             kb = M([[B("🔥 Force mint", callback_data=f"fsched:{did}")],
                     [B("back to draft", callback_data=f"wback:{did}")]])
             await _edit_or_send(None, chat_id, msg_id, text, kb, ctx)
             return
         lines = ["<b>🔐 gated phase schedule</b>", ""]
-        if workflow == "normal":
+        if workflow == "normal" and not_scheduled:
             lines.append(
-                f"Normal Schedule includes only locally eligible wallets; "
-                f"{not_scheduled} ineligible or unknown wallet(s) are excluded.")
+                f"{not_scheduled} wallet(s) got an explicit allowlist no, so they stay off this schedule. "
+                "Use Force mint for those wallets.")
         elif workflow == "force":
             lines.append(
                 "Force Schedule waits for the same phase open time as an eligible wallet. "
@@ -4174,7 +4196,7 @@ async def run_schedule_check(chat_id, ctx, did, msg_id=None, workflow="normal"):
         text = "\n".join(lines)
         await _edit_or_send(None, chat_id, msg_id, text, M(rows), ctx)
         return
-    allw, verdicts = await _draft_checks(d)
+    allw, verdicts = await _preflight_or_skip(d)
     text = "\n".join(panels.preflight_lines(verdicts, gated=False))
     if workflow == "both":
         text += (
@@ -4250,7 +4272,7 @@ async def force_mint(chat_id, ctx, did, msg_id=None):
     gated = mint_router.is_gated(view) or bool(stage and stage.get("gated"))
     if gated:
         status = phase_authorization_status(view)
-    elif d.get("price_wei") is None or not (d.get("mint_sig") or d.get("seadrop")):
+    elif view.get("price_wei") is None or not (d.get("mint_sig") or d.get("seadrop")):
         await ctx.bot.send_message(chat_id, "force mint needs a known mint price and a supported public mint call.")
         return
     if view.get("end_ts") and view["end_ts"] <= int(time.time()):
@@ -4265,7 +4287,7 @@ async def force_mint(chat_id, ctx, did, msg_id=None):
     if gated:
         auth_status = phase_authorization_status(view)
     else:
-        _allw, verdicts = await _draft_checks(d)
+        _allw, verdicts = await _preflight_or_skip(d)
     d["force_pending_until"] = int(time.time()) + 90
     text = (
         "<b>⚠️ FORCE MINT NOW</b>\n\n"
@@ -4306,7 +4328,7 @@ async def confirm_force_mint(chat_id, ctx, did, msg_id=None):
     gated = mint_router.is_gated(view) or bool(stage and stage.get("gated"))
     if gated:
         status = phase_authorization_status(view)
-    elif d.get("price_wei") is None or not (d.get("mint_sig") or d.get("seadrop")):
+    elif view.get("price_wei") is None or not (d.get("mint_sig") or d.get("seadrop")):
         await ctx.bot.send_message(chat_id, "the public mint price or supported mint call is no longer available.")
         return
     if view.get("end_ts") and view["end_ts"] <= int(time.time()):
@@ -4340,7 +4362,7 @@ async def schedule_draft(chat_id, ctx, did, msg_id=None, workflow=None):
     if force_start_ts is not None:
         view["start_ts"] = force_start_ts
     missing_schedule_time = not view.get("start_ts") and not view.get("sale_started_fn")
-    missing_public_route = d.get("price_wei") is None or not (
+    missing_public_route = view.get("price_wei") is None or not (
         d.get("mint_sig") or d.get("seadrop"))
     if missing_schedule_time or (not gated and missing_public_route):
         if gated and not view.get("start_ts") and not view.get("sale_started_fn"):
@@ -4387,8 +4409,8 @@ async def schedule_draft(chat_id, ctx, did, msg_id=None, workflow=None):
     if not workflows:
         await ctx.bot.send_message(
             chat_id,
-            "no locally eligible wallets were found for Normal Schedule. "
-            "Use Force Schedule to attempt the selected wallets at the configured phase time.",
+            "every selected wallet got an explicit allowlist no, so Normal Schedule did not queue them. "
+            "Use Force mint to attempt them at the phase open.",
         )
         return
 

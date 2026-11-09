@@ -588,5 +588,344 @@ class SourcifyAbiTests(unittest.TestCase):
         self.assertIn("/partial_match/1/", requests[1])
 
 
+class MintButtonWalkTests(unittest.IsolatedAsyncioTestCase):
+    """Drive the real mint buttons: pick wallets, schedule, force, and mint now."""
+
+    def setUp(self):
+        self.old_store, self.old_master = wallets.STORE, wallets.MASTER
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        wallets.STORE = Path(self.tmp.name) / "wallets.json"
+        wallets.MASTER = Path(self.tmp.name) / "master.key"
+        self.addCleanup(self._restore_store)
+        self.uid = bot.ADMIN_ID
+        self.addrs = []
+        for _ in range(2):
+            priv, addr = wallets.generate_wallet("ethereum")
+            wallets.add_wallet(self.uid, priv, 1, "ethereum")
+            self.addrs.append(addr)
+        self.sent = []
+
+    def _restore_store(self):
+        wallets.STORE, wallets.MASTER = self.old_store, self.old_master
+
+    def _ctx(self):
+        async def send_message(chat_id, text=None, reply_markup=None, **_kwargs):
+            self.sent.append((text, reply_markup))
+            return SimpleNamespace(message_id=len(self.sent))
+
+        async def edit_message_text(chat_id=None, message_id=None, text=None, reply_markup=None, **_kwargs):
+            self.sent.append((text, reply_markup))
+            return SimpleNamespace(message_id=message_id or 1)
+
+        return SimpleNamespace(
+            user_data={}, application=object(),
+            bot=SimpleNamespace(send_message=send_message, edit_message_text=edit_message_text),
+        )
+
+    def _query(self, data):
+        async def edit_message_text(text=None, reply_markup=None, **_kwargs):
+            self.sent.append((text, reply_markup))
+
+        from telegram.constants import ChatType
+        return SimpleNamespace(
+            answer=mock.AsyncMock(),
+            from_user=SimpleNamespace(id=self.uid, username=None),
+            data=data,
+            edit_message_text=edit_message_text,
+            message=SimpleNamespace(
+                chat_id=1, message_id=2,
+                chat=SimpleNamespace(type=ChatType.PRIVATE),
+                reply_text=mock.AsyncMock(),
+            ),
+        )
+
+    async def _tap(self, ctx, data):
+        await bot.on_callback(SimpleNamespace(callback_query=self._query(data)), ctx)
+
+    def _buttons(self, markup):
+        return [button for row in (markup.inline_keyboard if markup else []) for button in row]
+
+    def _assert_telegram(self, markup):
+        for button in self._buttons(markup):
+            self.assertLessEqual(len(button.text), 64, button.text)
+            self.assertLessEqual(len(button.callback_data.encode()), 64, button.callback_data)
+
+    def _actions(self, markup):
+        kinds = {"dsched", "fsched", "mnow", "fm", "bsched", "wsel"}
+        return [button.callback_data for button in self._buttons(markup)
+                if button.callback_data.split(":", 1)[0] in kinds]
+
+    def _upcoming(self, did):
+        start = int(time.time()) + 3600
+        return {
+            "name": "JPEGZ",
+            "contract": "0x9c0da87BbbE41A813461422E0521bC12f5386E28",
+            "chain": "ethereum",
+            "seadrop": True,
+            "mint_sig": "mintPublic(address,address,address,uint256)",
+            "fee_recipient": "0x0000a26b00c1f0df003000390027140000faa719",
+            "max_supply": 11111,
+            "minted": 0,
+            "phase": "treasury",
+            "phase_idx": 0,
+            "speed": "fast",
+            "gas_limit": "auto",
+            "fire_mode": "normal",
+            "mint_qty": 1,
+            "price_wei": None,
+            "wex": [],
+            "schedule": [
+                {"label": "TREASURY", "chain_key": "treasury", "gated": True, "list_mode": "gtd",
+                 "index": 1, "display_price_wei": 0, "display_per_wallet": 50,
+                 "display_start_ts": start, "display_end_ts": start + 660},
+                {"label": "FREE TO CLAIM", "chain_key": "free", "gated": True, "list_mode": "gtd",
+                 "index": 2, "display_price_wei": 0, "display_per_wallet": 2,
+                 "display_start_ts": start + 660, "display_end_ts": start + 3 * 3600},
+            ],
+        }, start
+
+    async def test_upcoming_gated_pick_schedule_and_card_buttons(self):
+        did = 7
+        draft, start = self._upcoming(did)
+        ctx = self._ctx()
+
+        async def unknown(_contract, _chain, rows, _stage):
+            return [(row, {"eligible": None, "authorization": "unknown"}) for row in rows]
+
+        with mock.patch.dict(bot.DRAFTS, {did: draft}, clear=True), \
+                mock.patch.dict(bot.MINTS, {}, clear=True), \
+                mock.patch.object(bot, "_next_id", [1]), \
+                mock.patch.object(bot, "save_drafts"), \
+                mock.patch.object(bot, "persist"), \
+                mock.patch.object(bot, "start_watcher") as watcher, \
+                mock.patch("acobot.eligible.probe_fleet", new=unknown):
+            card = bot.draft_kb(did, draft)
+            self._assert_telegram(card)
+            self.assertEqual(self._actions(card), [f"wsel:{did}", f"dsched:{did}"])
+            text = bot.draft_text(draft)
+            self.assertIn("TREASURY", text)
+            self.assertIn("FREE TO CLAIM", text)
+            self.assertIn("Schedule mint", text)
+            self.assertLessEqual(len(text), 4096)
+
+            await self._tap(ctx, f"wsel:{did}")
+            picker_text, picker = self.sent[-1]
+            self.assertIn(self.addrs[0], picker_text)
+            self.assertIn(self.addrs[1], picker_text)
+            self.assertIn(f"wt:{did}:0", [b.callback_data for b in self._buttons(picker)])
+            self.assertIn(f"dsched:{did}", [b.callback_data for b in self._buttons(picker)])
+            self._assert_telegram(picker)
+
+            await self._tap(ctx, f"wt:{did}:0")
+            self.assertIn(self.addrs[0].lower(), draft["wex"])
+            await self._tap(ctx, f"wall:{did}")
+            self.assertEqual(draft["wex"], [])
+            await self._tap(ctx, f"dph:{did}:1")
+            self.assertEqual(draft["phase"], "free")
+            await self._tap(ctx, f"dq:{did}:2")
+            self.assertEqual(draft["mint_qty"], 2)
+            await self._tap(ctx, f"dsp:{did}:superfast")
+            self.assertEqual(draft["speed"], "superfast")
+            await self._tap(ctx, f"dfm:{did}:prefire")
+            self.assertEqual(draft["fire_mode"], "prefire")
+            await self._tap(ctx, f"dg:{did}:500000")
+            self.assertEqual(draft["gas_limit"], 500000)
+            await self._tap(ctx, f"dgc:{did}")
+            self.assertEqual(ctx.user_data.get("await"), ("gas_limit", did))
+            from telegram.constants import ChatType
+            update = SimpleNamespace(
+                effective_user=SimpleNamespace(id=self.uid, username=None),
+                effective_chat=SimpleNamespace(id=1, type=ChatType.PRIVATE),
+                message=SimpleNamespace(text="300000", reply_text=mock.AsyncMock(), delete=mock.AsyncMock()),
+            )
+            await bot.on_text(update, ctx)
+            self.assertEqual(draft["gas_limit"], 300000)
+            self.assertIsNone(ctx.user_data.get("await"))
+            card = bot.draft_kb(did, draft)
+            self.assertEqual(self._actions(card), [f"wsel:{did}", f"dsched:{did}"])
+
+            await self._tap(ctx, f"dsched:{did}")
+            pre_text, pre = self.sent[-1]
+            self.assertIn(f"wconfirm:{did}", [b.callback_data for b in self._buttons(pre)])
+            self.assertNotIn("explicit allowlist no", pre_text.lower())
+            await self._tap(ctx, f"wconfirm:{did}")
+            self.assertNotIn(did, bot.DRAFTS)
+            record = bot.MINTS[1]
+            self.assertFalse(record["force"])
+            self.assertEqual(record["start_ts"], start + 660)
+            self.assertEqual(record["per_wallet"], 2)
+            self.assertIsNone(record["price_wei"])
+            self.assertEqual(record["display_price_wei"], 0)
+            self.assertEqual(record["fire_mode"], "prefire")
+            self.assertEqual(record["gas_limit"], 300000)
+            self.assertNotIn(self.addrs[0].lower(), record["wex"])
+            self.assertNotIn(self.addrs[1].lower(), record["wex"])
+            watcher.assert_called()
+
+    async def test_explicit_allowlist_miss_stays_off_the_normal_schedule(self):
+        did = 8
+        draft, _start = self._upcoming(did)
+        ctx = self._ctx()
+        miss = self.addrs[1].lower()
+
+        async def probe(_contract, _chain, rows, _stage):
+            return [(row, {"eligible": False if row["address"].lower() == miss else None}) for row in rows]
+
+        with mock.patch.dict(bot.DRAFTS, {did: draft}, clear=True), \
+                mock.patch.dict(bot.MINTS, {}, clear=True), \
+                mock.patch.object(bot, "_next_id", [1]), \
+                mock.patch.object(bot, "save_drafts"), \
+                mock.patch.object(bot, "persist"), \
+                mock.patch.object(bot, "start_watcher"), \
+                mock.patch("acobot.eligible.probe_fleet", new=probe):
+            await self._tap(ctx, f"dsched:{did}")
+            text, markup = self.sent[-1]
+            self.assertIn("explicit allowlist", text.lower())
+            self.assertIn(f"wconfirm:{did}", [b.callback_data for b in self._buttons(markup)])
+            await self._tap(ctx, f"wconfirm:{did}")
+            record = bot.MINTS[1]
+            self.assertIn(miss, record["wex"])
+            self.assertNotIn(self.addrs[0].lower(), record["wex"])
+            self.assertFalse(record["force"])
+
+    async def test_slow_probe_still_opens_schedule_confirm(self):
+        did = 9
+        draft, _start = self._upcoming(did)
+        ctx = self._ctx()
+
+        async def hang(*_args, **_kwargs):
+            await __import__("asyncio").sleep(30)
+
+        with mock.patch.dict(bot.DRAFTS, {did: draft}, clear=True), \
+                mock.patch.object(bot, "save_drafts"), \
+                mock.patch.object(bot, "ELIGIBILITY_PROBE_TIMEOUT", 0.05), \
+                mock.patch("acobot.eligible.probe_fleet", new=hang):
+            await self._tap(ctx, f"dsched:{did}")
+        text, markup = self.sent[-1]
+        self.assertIn(f"wconfirm:{did}", [b.callback_data for b in self._buttons(markup)])
+        self.assertNotIn("could not be checked", text)
+
+    async def test_blocked_wallet_force_waits_for_the_phase(self):
+        did = 10
+        draft, start = self._upcoming(did)
+        draft["wallet_report"] = [{
+            "address": self.addrs[0], "label": "Wallet 1", "verdict": "fail",
+            "eligibility": False, "reasons": ["not enough for the mint fee"], "selected": True,
+        }, {
+            "address": self.addrs[1], "label": "Wallet 2", "verdict": "ok",
+            "eligibility": True, "reasons": [], "selected": False,
+        }]
+        draft["wex"] = [self.addrs[1].lower()]
+        ctx = self._ctx()
+        card = bot.draft_kb(did, draft)
+        self.assertEqual(self._actions(card), [f"wsel:{did}", f"fsched:{did}"])
+        with mock.patch.dict(bot.DRAFTS, {did: draft}, clear=True), \
+                mock.patch.dict(bot.MINTS, {}, clear=True), \
+                mock.patch.object(bot, "_next_id", [1]), \
+                mock.patch.object(bot, "save_drafts"), \
+                mock.patch.object(bot, "persist"), \
+                mock.patch.object(bot, "start_watcher"):
+            await self._tap(ctx, f"fsched:{did}")
+            _text, markup = self.sent[-1]
+            self.assertIn(f"wconfirm:{did}:force", [b.callback_data for b in self._buttons(markup)])
+            await self._tap(ctx, f"wconfirm:{did}:force")
+            record = bot.MINTS[1]
+            self.assertTrue(record["force"])
+            self.assertEqual(record["start_ts"], start)
+            self.assertIn(self.addrs[1].lower(), record["wex"])
+            self.assertNotIn(self.addrs[0].lower(), record["wex"])
+
+    async def test_live_public_mint_now_and_force_now(self):
+        now = int(time.time())
+        did = 11
+        draft = {
+            "name": "JPEGZ",
+            "contract": "0x9c0da87BbbE41A813461422E0521bC12f5386E28",
+            "chain": "ethereum",
+            "seadrop": True,
+            "mint_sig": "mintPublic(address,address,address,uint256)",
+            "phase": "public",
+            "phase_idx": 0,
+            "price_wei": None,
+            "speed": "fast",
+            "gas_limit": "auto",
+            "fire_mode": "normal",
+            "mint_qty": 1,
+            "wex": [self.addrs[1].lower()],
+            "schedule": [{
+                "label": "PUBLIC", "chain_key": "public", "gated": False,
+                "display_price_wei": 0, "display_per_wallet": 2,
+                "display_start_ts": now - 60, "display_end_ts": now + 3600,
+            }],
+        }
+        ctx = self._ctx()
+        card = bot.draft_kb(did, draft)
+        self.assertEqual(self._actions(card), [f"wsel:{did}", f"mnow:{did}"])
+        with mock.patch.dict(bot.DRAFTS, {did: draft}, clear=True), \
+                mock.patch.dict(bot.MINTS, {}, clear=True), \
+                mock.patch.object(bot, "_next_id", [1]), \
+                mock.patch.object(bot, "save_drafts"), \
+                mock.patch.object(bot, "persist"), \
+                mock.patch.object(bot, "start_watcher"):
+            await self._tap(ctx, f"mnow:{did}")
+            text, markup = self.sent[-1]
+            self.assertIn("Mint now", text)
+            self.assertIn(f"mnowgo:{did}", [b.callback_data for b in self._buttons(markup)])
+            await self._tap(ctx, f"mnowgo:{did}")
+            queued = bot.MINTS[1]
+            self.assertFalse(queued["force"])
+            self.assertEqual(queued["price_wei"], 0)
+            self.assertLessEqual(queued["start_ts"], now)
+
+            live = dict(draft)
+            live["wallet_report"] = [{
+                "address": self.addrs[0], "label": "Wallet 1", "verdict": "fail",
+                "reasons": ["not enough for the mint fee"], "selected": True,
+            }]
+            bot.DRAFTS[did] = live
+            card = bot.draft_kb(did, live)
+            self.assertEqual(self._actions(card), [f"wsel:{did}", f"fm:{did}"])
+            self.sent.clear()
+            await self._tap(ctx, f"fm:{did}")
+            _text, markup = self.sent[-1]
+            self.assertIn(f"fmconfirm:{did}", [b.callback_data for b in self._buttons(markup)])
+            before = int(time.time())
+            await self._tap(ctx, f"fmconfirm:{did}")
+            forced = bot.MINTS[2]
+            self.assertTrue(forced["force"])
+            self.assertGreaterEqual(forced["start_ts"], before)
+            self.assertLessEqual(forced["start_ts"], int(time.time()) + 2)
+
+    async def test_slow_balance_check_still_offers_confirm(self):
+        did = 12
+        now = int(time.time())
+        draft = {
+            "contract": "0x" + "12" * 20,
+            "chain": "ethereum",
+            "phase": "public",
+            "price_wei": 0,
+            "start_ts": now + 600,
+            "mint_sig": "mint(uint256)",
+            "wex": [],
+        }
+        ctx = self._ctx()
+
+        async def hang(*_args, **_kwargs):
+            await __import__("asyncio").sleep(30)
+            return [], []
+
+        with mock.patch.dict(bot.DRAFTS, {did: draft}, clear=True), \
+                mock.patch.object(bot, "save_drafts"), \
+                mock.patch.object(bot, "mint_wallets", return_value=[
+                    (self.uid, "Wallet 1", self.addrs[0], 1)]), \
+                mock.patch.object(bot, "_draft_checks", new=hang), \
+                mock.patch.object(bot, "WALLET_CHECK_TIMEOUT", 0.05):
+            await self._tap(ctx, f"dsched:{did}")
+        text, markup = self.sent[-1]
+        self.assertIn("slow", text.lower())
+        self.assertIn(f"wconfirm:{did}", [b.callback_data for b in self._buttons(markup)])
+
+
 if __name__ == "__main__":
     unittest.main()

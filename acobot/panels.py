@@ -254,7 +254,7 @@ def preflight_lines(verdicts, gated=False):
             out.append(f"    • ⚠️ {esc(reason)}")
     failures = [v for v in verdicts if v.get("reasons") or v.get("reason") not in (None, "ready") or v.get("verdict") in ("warn", "fail")]
     if failures:
-        out += ["", "⚠️ review the listed wallets. force mint is required to proceed with any warning or failed check."]
+        out += ["", "⚠️ review the listed wallets. confirming still attempts every selected wallet."]
     elif gated:
         out += ["", "⚠️ gated stage: eligibility must be verified before scheduling"]
     return out
