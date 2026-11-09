@@ -132,7 +132,7 @@ class MintInputTests(unittest.TestCase):
 
 
 class ForceMintTests(unittest.IsolatedAsyncioTestCase):
-    def test_public_draft_offers_immediate_force_without_a_start_time(self):
+    def test_ready_public_sale_without_a_clock_offers_mint_now(self):
         draft = {
             "contract": "0x" + "12" * 20,
             "chain": "ethereum",
@@ -140,14 +140,18 @@ class ForceMintTests(unittest.IsolatedAsyncioTestCase):
             "price_wei": 10**16,
             "mint_sig": "mint(uint256)",
             "start_ts": None,
+            "wallet_selected": 1,
+            "wallet_report": [{"verdict": "ok", "reasons": []}],
         }
 
         keyboard = bot.draft_kb(23, draft)
         callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
 
-        self.assertIn("fm:23", callbacks)
+        self.assertIn("mnow:23", callbacks)
+        self.assertNotIn("fm:23", callbacks)
+        self.assertNotIn("bsched:23", callbacks)
 
-    def test_gated_draft_keeps_normal_and_force_schedule_available(self):
+    def test_ineligible_wallet_offers_only_force_mint(self):
         draft = {
             "contract": "0x" + "12" * 20,
             "chain": "ethereum",
@@ -155,37 +159,35 @@ class ForceMintTests(unittest.IsolatedAsyncioTestCase):
             "gated": True,
             "price_wei": 0,
             "mint_sig": "mint(uint256)",
-            "start_ts": 100,
+            "start_ts": int(time.time()) + 3600,
+            "wallet_selected": 1,
+            "wallet_report": [{"verdict": "fail", "eligibility": False,
+                               "reasons": ["allowlist check: the chain rejected this wallet's mint"]}],
         }
 
         keyboard = bot.draft_kb(24, draft)
         callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
 
-        self.assertIn("fm:24", callbacks)
-        self.assertIn("dsched:24", callbacks)
-        self.assertTrue(any("Both" in button.text
-                            for row in keyboard.inline_keyboard for button in row))
+        self.assertIn("fsched:24", callbacks)
+        self.assertNotIn("dsched:24", callbacks)
+        self.assertNotIn("bsched:24", callbacks)
 
-    def test_gated_draft_offers_force_when_phase_api_is_configured(self):
+    def test_live_ineligible_wallet_offers_only_force_mint_now(self):
         draft = {
             "contract": "0x" + "12" * 20,
             "chain": "ethereum",
-            "phase": "allowlist",
-            "price_wei": None,
-            "start_ts": 100,
-            "schedule": [{
-                "chain_key": "allowlist", "gated": True, "label": "GTD",
-                "start_ts": 100, "merkle_root": "0x" + "00" * 32,
-            }],
-            "phase_idx": 0,
+            "phase": "public",
+            "price_wei": 0,
+            "mint_sig": "mint(uint256)",
+            "start_ts": int(time.time()) - 60,
+            "wallet_selected": 1,
+            "wallet_report": [{"verdict": "warn", "reasons": ["not enough for the mint fee"]}],
         }
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
-                bot.mintapi, "STORE", Path(temp_dir) / "mint_apis.json"):
-            bot.mintapi.save(draft["contract"],
-                             "https://mint.example/api/{wallet}?phase={phase}&qty={qty}")
-            keyboard = bot.draft_kb(25, draft)
-        callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        callbacks = [button.callback_data for row in bot.draft_kb(25, draft).inline_keyboard for button in row]
         self.assertIn("fm:25", callbacks)
+        self.assertNotIn("mnow:25", callbacks)
+        self.assertNotIn("dsched:25", callbacks)
+        self.assertNotIn("bsched:25", callbacks)
 
     async def test_gated_force_ignores_local_ineligibility_and_uses_one_tx_confirmation(self):
         original_drafts, original_mint_wallets = dict(bot.DRAFTS), bot.mint_wallets
@@ -238,15 +240,18 @@ class ForceMintTests(unittest.IsolatedAsyncioTestCase):
             "phase": "allowlist",
             "gated": True,
         }
+        verdict = {"label": "Wallet 1", "address": wallet, "verdict": "ok",
+                   "eligibility": None, "reasons": []}
         with mock.patch.object(
                 bot, "mint_wallets",
                 return_value=[(bot.ADMIN_ID, "Wallet 1", wallet, 1)]), \
-                mock.patch.object(bot.mintapi, "supports_phase", return_value=False):
+                mock.patch.object(bot, "CFG", SimpleNamespace(chains={"ethereum": object()})), \
+                mock.patch.object(bot.fleet, "check_all", return_value=[verdict]):
             _all_wallets, results = await bot._draft_checks(draft)
 
         self.assertIsNone(results[0]["eligibility"])
-        self.assertEqual(results[0]["authorization"], "required")
-        self.assertTrue(any("OpenSea, Reservoir, and Magic Eden" in reason for reason in results[0]["reasons"]))
+        self.assertEqual(results[0]["verdict"], "ok")
+        self.assertFalse(bot.wallet_blocks_schedule(results[0]))
 
     async def test_force_schedule_uses_immediate_start_time(self):
         original_drafts, original_mints = dict(bot.DRAFTS), dict(bot.MINTS)

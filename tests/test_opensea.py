@@ -251,10 +251,14 @@ class T4(unittest.TestCase):
         self.assertIn("GTD: guaranteed allowlist spot", text)
         self.assertIn("discovered and simulated per wallet before the phase opens", text)
 
+        draft["wallet_report"] = [{"verdict": "ok", "reasons": [], "eligibility": True}]
+        draft["wallet_selected"] = 1
         markup = bot.draft_kb(4, draft)
         buttons = [button for row in markup.inline_keyboard for button in row]
         self.assertTrue(any(button.callback_data == "dsched:4" for button in buttons))
-        self.assertTrue(any(button.callback_data == "fm:4" for button in buttons))
+        self.assertFalse(any(button.callback_data == "fm:4" for button in buttons))
+        self.assertFalse(any(button.callback_data == "fsched:4" for button in buttons))
+        self.assertFalse(any(button.callback_data == "bsched:4" for button in buttons))
         self.assertTrue(any(button.callback_data == "dfm:4:prefire" for button in buttons))
         self.assertTrue(any(button.callback_data == "dfm:4:normal" for button in buttons))
         self.assertTrue(any(button.callback_data == "dfm:4:dual" for button in buttons))
@@ -443,13 +447,19 @@ class GatedScheduleTests(unittest.IsolatedAsyncioTestCase):
         edit = AsyncMock()
         with patch.dict(bot.DRAFTS, {77: draft}, clear=True), \
                 patch.object(bot, "mint_wallets", return_value=entries), \
+                patch.object(bot, "_draft_checks", new=AsyncMock(return_value=(
+                    entries, [{"label": "Wallet 1", "address": entries[0][2], "verdict": "ok",
+                               "eligibility": None, "reasons": [], "balance_wei": 10**18}]))), \
                 patch.object(bot, "_edit_or_send", new=edit):
             await bot.show_wallet_step(123, ctx, 77)
         text, markup = edit.await_args.args[3:5]
         buttons = [button for row in markup.inline_keyboard for button in row]
-        self.assertIn("phase authorization: missing wallet-specific project signature", text)
-        self.assertFalse(any(button.callback_data == "wchk:77" for button in buttons))
-        self.assertTrue(any(button.callback_data == "wgo:77" for button in buttons))
+        self.assertIn("Wallet 1", text)
+        self.assertIn("can mint", text)
+        self.assertFalse(any(button.callback_data == "bsched:77" for button in buttons))
+        self.assertTrue(any(button.callback_data == "dsched:77" for button in buttons))
+        self.assertTrue(any(button.callback_data == "wt:77:0" for button in buttons))
+        self.assertTrue(all(len(button.text) <= 64 for button in buttons))
 
     async def test_legacy_eligibility_report_never_changes_wallet_selection(self):
         wallet = "0x" + "44" * 20

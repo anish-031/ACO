@@ -102,6 +102,10 @@ class Fleet(unittest.TestCase):
         self.assertEqual(r["verdict"], "fail")
         self.assertEqual(r["eligibility"], False)
         self.assertIn("allowlist", r["reasons"][0])
+        upcoming = dict(self.mint, phase="allowlist", start_ts=int(__import__("time").time()) + 3600)
+        r = fleet.check_wallet(FakeRPC(), CHAIN, upcoming, self.addr, "Wallet 1", 1)
+        self.assertIsNone(r["eligibility"])
+        self.assertNotEqual(r["verdict"], "fail")
         # gated stage + estimate succeeds -> wallet verified on-chain
         r = fleet.check_wallet(FakeRPC(est_fail=False), CHAIN, dict(self.mint, phase="allowlist"), self.addr, "Wallet 1", 1)
         self.assertEqual(r["eligibility"], True)

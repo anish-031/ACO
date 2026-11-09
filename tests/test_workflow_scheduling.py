@@ -150,23 +150,33 @@ class ScheduleWorkflowTests(unittest.IsolatedAsyncioTestCase):
             bot._next_id[0] = old_next_id
             bot.mint_wallets = old_mint_wallets
 
-    def test_schedule_panel_keeps_all_three_workflows_visible(self):
+    def test_schedule_panel_shows_one_action_for_the_wallets(self):
+        future = int(__import__("time").time()) + 3600
         draft = {
             "contract": "0x" + "33" * 20,
             "chain": "ethereum",
             "phase": "allowlist",
             "gated": True,
-            "start_ts": 12345,
+            "start_ts": future,
+            "wallet_selected": 1,
+            "wallet_report": [{"verdict": "ok", "reasons": [], "eligibility": True}],
         }
         callbacks = [
             button.callback_data
             for row in bot.draft_kb(92, draft).inline_keyboard
             for button in row
         ]
-
         self.assertIn("dsched:92", callbacks)
-        self.assertIn("fsched:92", callbacks)
-        self.assertIn("bsched:92", callbacks)
-        self.assertIn("dfm:92:prefire", callbacks)
-        self.assertIn("dfm:92:normal", callbacks)
-        self.assertIn("dfm:92:dual", callbacks)
+        self.assertNotIn("fsched:92", callbacks)
+        self.assertNotIn("bsched:92", callbacks)
+
+        draft["wallet_report"] = [{"verdict": "warn", "eligibility": None,
+                                   "reasons": ["not enough for the mint fee"]}]
+        blocked = [
+            button.callback_data
+            for row in bot.draft_kb(92, draft).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("fsched:92", blocked)
+        self.assertNotIn("dsched:92", blocked)
+        self.assertNotIn("bsched:92", blocked)

@@ -778,17 +778,76 @@ def draft_text(d):
         lines.append("authorization is discovered and simulated per wallet before the phase opens.")
     else:
         lines.append(esc(FIRE_MODE_TEXT.get(mode, FIRE_MODE_TEXT["dual"])))
-    lines += [
-        "",
-        "📅 <b>Schedule</b>",
-        "Normal fires eligible wallets at the phase open.",
-        "Force still sends the real phase transaction at that time.",
-        "Both splits eligible and other wallets into two schedules.",
-    ]
+    lines += ["", ACTION_LINE[mint_action(d)]]
     safety = [str(x) for x in (d.get("safety") or []) if x and not str(x).startswith("-")]
     if safety:
         lines += ["", "🛡 " + esc(" · ".join(safety[:3]))]
     return "\n".join(lines)[:4000]
+
+
+def short_addr(addr):
+    text = str(addr or "")
+    if len(text) <= 13:
+        return text
+    return text[:6] + "…" + text[-4:]
+
+
+def wallet_blocks_schedule(verdict):
+    """True when this wallet should not take the normal schedule."""
+    if not isinstance(verdict, dict):
+        return False
+    if verdict.get("eligibility") is False:
+        return True
+    text = " ".join(str(reason) for reason in (verdict.get("reasons") or [])).lower()
+    if "not enough" in text or "already minted" in text:
+        return True
+    return verdict.get("verdict") == "fail"
+
+
+def phase_is_live(d):
+    view = draft_phase_view(d)
+    if view.get("sale_started") is True:
+        return True
+    status = _phase_status(view.get("start_ts"), view.get("end_ts"))
+    if status == "live":
+        return True
+    return status == "unknown" and not view.get("start_ts") and not mint_router.is_gated(view)
+
+
+def mint_action(d):
+    """One button for the current wallets and phase. No Normal+Force+Both row."""
+    if "wallet_report" not in d:
+        return "check"
+    if not d.get("wallet_selected"):
+        return "need_wallets"
+    blocked = any(wallet_blocks_schedule(item) for item in (d.get("wallet_report") or []))
+    live = phase_is_live(d)
+    if blocked:
+        return "force_now" if live else "force"
+    return "mint" if live else "schedule"
+
+
+ACTION_BUTTON = {
+    "check": ("👛 Check wallets", "wsel"),
+    "need_wallets": ("👛 Pick wallets to mint", "wsel"),
+    "schedule": ("📅 Schedule mint", "dsched"),
+    "force": ("🔥 Force mint", "fsched"),
+    "mint": ("⚡ Mint now", "mnow"),
+    "force_now": ("🔥 Force mint now", "fm"),
+}
+ACTION_LINE = {
+    "check": "👛 Check wallets to see who can mint this phase.",
+    "need_wallets": "👛 Pick at least one wallet before scheduling.",
+    "schedule": "📅 Schedule mint. The selected wallets can mint, so it fires at the phase open.",
+    "force": "🔥 Force mint. A selected wallet is short on balance or not eligible. It still fires at the phase open.",
+    "mint": "⚡ Mint now. This phase is live and the selected wallets can mint.",
+    "force_now": "🔥 Force mint now. This phase is live, and a selected wallet is not eligible.",
+}
+
+
+def action_button(did, d):
+    label, kind = ACTION_BUTTON[mint_action(d)]
+    return B(label, callback_data=f"{kind}:{did}")
 
 
 def draft_kb(did, d):
@@ -796,7 +855,6 @@ def draft_kb(did, d):
     selected_stage = view.get("_selected_stage")
     rows = []
     sched = d.get("schedule")
-    gated = [(i, st) for i, st in enumerate(sched or []) if st.get("gated")]
     if sched and len(sched) > 1:
         # every stage is a button, gated (allowlist) ones included. the phase block carries the warning.
         sel_i = _selected_index(d, [(st.get("chain_key") or st.get("key"),) for st in sched])
@@ -813,20 +871,7 @@ def draft_kb(did, d):
                 for n, st in enumerate(stage_list)]
         for i in range(0, len(prow), 2):
             rows.append(prow[i:i + 2])
-    phase_view = draft_phase_view(d)
-    gated = mint_router.is_gated(phase_view)
-    force_ready = gated or (
-        not gated and d.get("price_wei") is not None
-        and (d.get("mint_sig") or d.get("seadrop"))
-    )
-    rows.append([
-        B("📅 NORMAL SCHEDULE", callback_data=f"dsched:{did}"),
-        B("🔥 FORCE SCHEDULE", callback_data=f"fsched:{did}"),
-    ])
-    rows.append([
-        B("🔀 Both schedules", callback_data=f"bsched:{did}"),
-        *( [B("⚡ FORCE MINT NOW", callback_data=f"fm:{did}")] if force_ready else [] ),
-    ])
+    rows.append([action_button(did, d)])
     rows.append([B("🔄 refresh live chain data", callback_data=f"drefresh:{did}")])
     rows.append([B("👛 pick wallets to mint", callback_data=f"wsel:{did}")])
     rows.append([B(f"🌐 chain: {d.get('chain', CHAIN_NAME)}", callback_data=f"dc:{did}")])
@@ -912,16 +957,23 @@ async def _edit_panel(q, text, reply_markup=None):
 
 
 async def _edit_or_send(update_or_ctx, chat_id, msg_id, text, kb, ctx):
+    text = str(text or "")[:4000]
     try:
         if msg_id:
             await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=kb)
             return msg_id
-    except Exception as e:
+    except BadRequest as e:
         if "not modified" in str(e).lower():
             return msg_id
+        log.info("edit in place failed, sending new panel: %s", e)
+    except Exception as e:
         log.info("edit in place failed, sending new panel: %s", type(e).__name__)
-    m = await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-    return m.message_id
+    try:
+        m = await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+        return m.message_id
+    except BadRequest:
+        m = await ctx.bot.send_message(chat_id=chat_id, text=plain_panel(text), reply_markup=kb)
+        return m.message_id
 
 
 def main_panel():
@@ -1349,6 +1401,7 @@ async def start_draft(chat_id, ctx, contract, chain_name=None):
             d["fire_mode"] = recommended_fire_mode(stage)
     d.setdefault("fire_mode", "dual")   # FCFS and public races use both shots; GTD uses one
     await refresh_fees(d)
+    await refresh_wallet_report(d)
     did = max(DRAFTS.keys(), default=0) + 1
     DRAFTS[did] = d
     save_drafts()
@@ -1526,6 +1579,7 @@ async def on_callback(update: Update, ctx):
             phases = d.get("phases") or []
             d["phase"] = phases[int(i)] if int(i) < len(phases) else (phases[0] if phases else "public")
         d["phase_idx"] = int(i)  # single-select: this row only; all others are cleared
+        await refresh_wallet_report(d)
         save_drafts()
         # silent select: allowlist phases are selectable like any other; the warning lives in the phase block
         await _edit_panel(q, draft_text(d), draft_kb(int(did), d))
@@ -1537,7 +1591,8 @@ async def on_callback(update: Update, ctx):
         if d is None:
             await ctx.bot.send_message(chat_id, "that draft is gone.")
             return
-        d["mint_qty"] = max(1, min(int(n), qty_cap(d)))
+        d["mint_qty"] = max(1, min(int(n), qty_cap(draft_phase_view(d))))
+        await refresh_wallet_report(d)
         save_drafts()
         await _edit_panel(q, draft_text(d), draft_kb(int(did), d))
     elif data.startswith("dfm:"):
@@ -1602,7 +1657,17 @@ async def on_callback(update: Update, ctx):
         if uid != ADMIN_ID:
             return
         did = int(data.split(":")[1])
-        await run_schedule_check(chat_id, ctx, did, q.message.message_id, workflow="both")
+        d = DRAFTS.get(did)
+        workflow = "force" if d is not None and mint_action(d) in {"force", "force_now"} else "normal"
+        await run_schedule_check(chat_id, ctx, did, q.message.message_id, workflow=workflow)
+    elif data.startswith("mnow:"):
+        if uid != ADMIN_ID:
+            return
+        await mint_now(chat_id, ctx, int(data.split(":")[1]), q.message.message_id)
+    elif data.startswith("mnowgo:"):
+        if uid != ADMIN_ID:
+            return
+        await confirm_mint_now(chat_id, ctx, int(data.split(":")[1]), q.message.message_id)
     elif data.startswith("fmconfirm:"):
         if uid != ADMIN_ID:
             return
@@ -1860,6 +1925,7 @@ async def on_callback(update: Update, ctx):
         if live.get("safety"):
             d["safety"] = live["safety"]
         await refresh_fees(d)
+        await refresh_wallet_report(d)
         save_drafts()
         await _edit_panel(q, draft_text(d), reply_markup=draft_kb(did, d))
     elif data.startswith("dc:"):
@@ -3662,39 +3728,53 @@ def mint_wallets(d):
 
 
 async def _draft_checks(d, selected_only=True):
-    """Read-only per-wallet balance/gas/limit and gated-stage eligibility checks."""
-    d = draft_phase_view(d)
+    """Read-only per-wallet balance, gas, and allowlist simulation. Never raises."""
+    view = draft_phase_view(d)
     allw = mint_wallets(d)
     excluded = {a.lower() for a in d.get("wex") or []}
     chosen = [(lbl, a, q) for _o, lbl, a, q in allw if not selected_only or a.lower() not in excluded]
-    if mint_router.is_gated(d):
-        status = phase_authorization_status(d)
-        reason = ("authorization required; " + status["detail"]
-                  + "; local eligibility is informational and does not block the mint")
+    if not chosen:
+        return allw, []
+    chain_name = view.get("chain", CHAIN_NAME)
+    cfg = CFG if CFG is not None else None
+    chains = getattr(cfg, "chains", None) or {}
+    chain = chains.get(chain_name) if hasattr(chains, "get") else None
+    if not chain:
         return allw, [{"label": label, "address": address, "masked": wallets.mask(address),
                        "verdict": "warn", "eligibility": None,
-                       "authorization": "required" if status["required"] else "not_required",
-                       "reasons": [reason]}
+                       "reasons": [f"balance check unavailable on {chain_name}"]}
                       for label, address, _qty in chosen]
-    chain_name = d.get("chain", CHAIN_NAME)
-    chain = CFG.chains.get(chain_name)
-    if not chain:
-        return allw, [{"label": l, "address": a, "masked": wallets.mask(a), "verdict": "fail", "reasons": [f"chain {chain_name} is not configured"]} for l,a,q in chosen]
     try:
-        verdicts = await asyncio.to_thread(fleet.check_all, chain, d, chosen)
+        verdicts = await asyncio.to_thread(fleet.check_all, chain, view, chosen)
     except Exception as exc:
         log.warning("wallet preflight failed: %s", type(exc).__name__)
-        verdicts = [{"label": l, "address": a, "masked": wallets.mask(a), "verdict": "warn", "reasons": [f"check failed: {type(exc).__name__}"]} for l,a,q in chosen]
-    # eligibility now comes from the on-chain simulation in fleet.check_all:
-    # the mint tx is eth_call'd FROM each wallet, so allowlist membership is verified for real.
-    for v in verdicts:
-        if v.get("eligibility") is True:
-            v.setdefault("reasons", [])[:] = [r for r in v.get("reasons", []) if "allowlist" not in r]
-            if v.get("verdict") == "warn" and not v.get("reasons"):
-                v["verdict"] = "ok"
-        elif v.get("eligibility") is False:
-            v["verdict"] = "fail"
+        verdicts = [{"label": label, "address": address, "masked": wallets.mask(address),
+                     "verdict": "warn", "eligibility": None,
+                     "reasons": [f"check failed: {type(exc).__name__}"]}
+                    for label, address, _qty in chosen]
+    for verdict in verdicts:
+        if verdict.get("eligibility") is True:
+            verdict.setdefault("reasons", [])[:] = [
+                reason for reason in verdict.get("reasons", []) if "allowlist" not in str(reason).lower()]
+            if verdict.get("verdict") == "warn" and not verdict.get("reasons"):
+                verdict["verdict"] = "ok"
+        elif verdict.get("eligibility") is False:
+            verdict["verdict"] = "fail"
     return allw, verdicts
+
+
+async def refresh_wallet_report(d):
+    """Store which selected wallets can mint. A failed read does not mark them ineligible."""
+    try:
+        allw, verdicts = await _draft_checks(d)
+    except Exception as exc:
+        log.warning("wallet report failed: %s", type(exc).__name__)
+        allw, verdicts = [], []
+    excluded = {a.lower() for a in d.get("wex") or []}
+    d["wallet_count"] = len(allw)
+    d["wallet_selected"] = sum(1 for _owner, _label, address, _qty in allw if address.lower() not in excluded)
+    d["wallet_report"] = verdicts
+    return d
 
 
 async def _split_by_local_eligibility(draft, entries):
@@ -3766,21 +3846,40 @@ async def show_wallet_step(chat_id, ctx, did, msg_id=None):
     if d is None:
         await ctx.bot.send_message(chat_id, "that draft is gone.")
         return
+    await refresh_wallet_report(d)
+    save_drafts()
     view = draft_phase_view(d)
     allw = mint_wallets(d)
-    text = "\n".join(panels.wallet_step_lines(view, allw))
+    by_address = {str(item.get("address", "")).lower(): item for item in (d.get("wallet_report") or [])}
+    lines = [
+        f"👛 <b>{esc(view.get('name') or 'mint')}</b>",
+        "Tap a wallet to include or skip it. The button below matches the wallets that stay selected.",
+        "",
+    ]
+    if not allw:
+        lines.append("No wallets on this chain yet. Add one in /wallets first.")
+    excluded = {a.lower() for a in d.get("wex") or []}
     rows = []
-    for i, (_o, lbl, a, _q) in enumerate(allw):
-        mark = "⬜" if a.lower() in {x.lower() for x in d.get("wex") or []} else "✅"
-        rows.append([B(f"{mark} {lbl} {wallets.mask(a)}", callback_data=f"wt:{did}:{i}")])
+    for i, (_owner, label, address, qty) in enumerate(allw):
+        selected = address.lower() not in excluded
+        verdict = by_address.get(address.lower()) or {}
+        state = "can mint" if selected and not wallet_blocks_schedule(verdict) else (
+            "skipped" if not selected else "force only")
+        reason = "; ".join(str(item) for item in (verdict.get("reasons") or [])[:2])
+        balance = verdict.get("balance_wei")
+        balance_s = f"{balance / 1e18:.4f} ETH" if isinstance(balance, int) else "balance unread"
+        lines.append(
+            f"{'✅' if selected else '⬜'} <b>{esc(label)}</b> · {esc(state)} · {esc(balance_s)} · x{qty}")
+        lines.append(f"<code>{esc(address)}</code>")
+        if reason and selected:
+            lines.append(esc(reason))
+        rows.append([B(
+            clip_button(f"{'✅' if selected else '⬜'} {label} {short_addr(address)}"),
+            callback_data=f"wt:{did}:{i}")])
+    lines += ["", ACTION_LINE[mint_action(d)]]
     rows.append([B("all wallets", callback_data=f"wall:{did}")])
-    if mint_router.is_gated(view):
-        status = phase_authorization_status(view)
-        text += "\n\nphase authorization: " + esc(status["detail"])
-    else:
-        rows[-1].append(B("simulate mint call", callback_data=f"wchk:{did}"))
-    rows.append([B("schedule", callback_data=f"wgo:{did}"), B("back", callback_data=f"wback:{did}")])
-    await _edit_or_send(None, chat_id, msg_id, text, M(rows), ctx)
+    rows.append([action_button(did, d), B("back", callback_data=f"wback:{did}")])
+    await _edit_or_send(None, chat_id, msg_id, "\n".join(lines), M(rows), ctx)
 
 
 async def run_check(chat_id, ctx, did, msg_id=None):
@@ -3842,8 +3941,7 @@ async def run_schedule_check(chat_id, ctx, did, msg_id=None, workflow="normal"):
                 "Use Force Schedule to attempt the selected wallets at the configured phase time, "
                 "or Both to put them in the Force workflow."
             )
-            kb = M([[B("🔥 Force Schedule", callback_data=f"fsched:{did}"),
-                     B("🔀 Both", callback_data=f"bsched:{did}")],
+            kb = M([[B("🔥 Force mint", callback_data=f"fsched:{did}")],
                     [B("back to draft", callback_data=f"wback:{did}")]])
             await _edit_or_send(None, chat_id, msg_id, text, kb, ctx)
             return
@@ -3909,6 +4007,45 @@ async def run_schedule_check(chat_id, ctx, did, msg_id=None, workflow="normal"):
             "transaction simulation or execution failures will be reported per wallet."
         )
     await _edit_or_send(None, chat_id, msg_id, text, M(rows), ctx)
+
+
+async def mint_now(chat_id, ctx, did, msg_id=None):
+    d = DRAFTS.get(did)
+    if d is None:
+        await ctx.bot.send_message(chat_id, "that draft is gone.")
+        return
+    selected = [entry for entry in mint_wallets(d) if entry[2].lower() not in {a.lower() for a in d.get("wex") or []}]
+    if not selected:
+        await ctx.bot.send_message(chat_id, "no wallets selected. pick at least one wallet before minting.")
+        return
+    d["mint_now_until"] = int(time.time()) + 90
+    save_drafts()
+    lines = [
+        "<b>⚡ Mint now</b>",
+        "",
+        "This phase is live. Confirm to send the mint from the selected wallets.",
+        "",
+    ]
+    lines.extend(f"✅ {esc(label)} {esc(short_addr(address))}" for _owner, label, address, _qty in selected)
+    rows = [[B("⚡ Confirm mint now", callback_data=f"mnowgo:{did}"),
+             B("Cancel", callback_data=f"wback:{did}")]]
+    await _edit_or_send(None, chat_id, msg_id, "\n".join(lines), M(rows), ctx)
+
+
+async def confirm_mint_now(chat_id, ctx, did, msg_id=None):
+    d = DRAFTS.get(did)
+    if d is None:
+        await ctx.bot.send_message(chat_id, "that draft is gone.")
+        return
+    if d.get("mint_now_until", 0) < int(time.time()):
+        d.pop("mint_now_until", None)
+        save_drafts()
+        await ctx.bot.send_message(chat_id, "mint confirmation expired. open the draft and try again.")
+        return
+    d["force_start_ts"] = int(time.time())
+    d["mint_now"] = True
+    d.pop("mint_now_until", None)
+    await schedule_draft(chat_id, ctx, did, msg_id, workflow="normal")
 
 
 async def force_mint(chat_id, ctx, did, msg_id=None):
@@ -4033,7 +4170,9 @@ async def schedule_draft(chat_id, ctx, did, msg_id=None, workflow=None):
         await ctx.bot.send_message(chat_id, "⚠️ no wallets selected. pick at least one wallet before scheduling.")
         return
 
-    if workflow in {"force", "immediate_force"}:
+    if d.pop("mint_now", None):
+        workflows = [("normal", entries)]
+    elif workflow in {"force", "immediate_force"}:
         workflows = [("force", entries)]
     elif gated:
         try:
