@@ -451,6 +451,20 @@ def _selected_index(d, items):
     return None
 
 
+def select_initial_phase(d):
+    """Open on the first phase. Public is selected only when that phase is tapped."""
+    schedule = d.get("schedule") or []
+    if schedule:
+        d["phase_idx"] = 0
+        first = schedule[0]
+        d["phase"] = first.get("chain_key") or first.get("key") or d.get("phase") or "public"
+        return
+    phases = d.get("phases") or []
+    if phases:
+        d["phase_idx"] = 0
+        d["phase"] = phases[0]
+
+
 def draft_phase_view(draft):
     """Return display values for the selected schedule row without changing execution data."""
     view = dict(draft)
@@ -1462,8 +1476,7 @@ async def start_draft(chat_id, ctx, contract, chain_name=None):
     d["chain"] = cname
     d.setdefault("speed", "fast")
     d.setdefault("gas_limit", "auto")
-    if d.get("phases"):
-        d.setdefault("phase", "public" if "public" in d["phases"] else d["phases"][0])
+    select_initial_phase(d)
     if not d.get("fire_mode_picked"):
         stage = draft_phase_view(d).get("_selected_stage")
         if stage:
@@ -4054,6 +4067,8 @@ def _wallet_picker(did, d):
         lines = ["👛 wallets", "Tap a wallet to include or skip it."]
     if d.get("wallet_note") and not allw:
         lines.append(esc(d["wallet_note"]))
+    if len(allw) > 1:
+        lines.append("Every checked wallet mints. Tap one to turn that wallet off.")
     lines += ["", ACTION_LINE[mint_action(d)]]
     rows = []
     for i, (_owner, label, address, _qty) in enumerate(allw):

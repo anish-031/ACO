@@ -201,6 +201,15 @@ class T4(unittest.TestCase):
         self.assertIn("GMT+5:45", text)
         self.assertTrue(all(st["gated"] and not st["snipeable"] for st in schedule[:3]))
         self.assertTrue(schedule[-1]["snipeable"])
+        draft["phase"] = "public"
+        bot.select_initial_phase(draft)
+        self.assertEqual(draft["phase_idx"], 0)
+        selected = bot.draft_phase_view(draft)["_selected_stage"]["label"]
+        self.assertIn("Team", selected)
+        self.assertNotIn("PUBLIC", selected)
+        buttons = [button for row in bot.draft_kb(4, draft).inline_keyboard for button in row]
+        self.assertTrue(any(button.text.startswith("✅") and "Team" in button.text for button in buttons))
+        self.assertFalse(any(button.text.startswith("✅") and "PUBLIC" in button.text for button in buttons))
 
     def test_selecting_gtd_uses_its_display_terms_and_stays_gated(self):
         chain = [

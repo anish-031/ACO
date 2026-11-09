@@ -926,6 +926,67 @@ class MintButtonWalkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("slow", text.lower())
         self.assertIn(f"wconfirm:{did}", [b.callback_data for b in self._buttons(markup)])
 
+    async def test_public_phase_lists_both_wallets_and_can_keep_one(self):
+        did = 13
+        start = int(time.time()) + 7200
+        draft = {
+            "name": "JPEGZ",
+            "contract": "0x9c0da87BbbE41A813461422E0521bC12f5386E28",
+            "chain": "ethereum",
+            "seadrop": True,
+            "mint_sig": "mintPublic(address,address,address,uint256)",
+            "mint_to": "0x00005ea00ac477b1030ce78506496e8c2de24bf5",
+            "fee_recipient": "0x0000a26b00c1f0df003000390027140000faa719",
+            "price_wei": 0,
+            "phase": "public",
+            "phase_idx": 1,
+            "mint_qty": 1,
+            "speed": "fast",
+            "gas_limit": "auto",
+            "fire_mode": "normal",
+            "wex": [],
+            "schedule": [
+                {"label": "TREASURY", "chain_key": "allowlist", "gated": True, "list_mode": "presale",
+                 "display_price_wei": 0, "display_per_wallet": 50,
+                 "display_start_ts": start - 3600, "display_end_ts": start},
+                {"label": "FREE TO CLAIM - PUBLIC", "chain_key": "public", "gated": False, "list_mode": "public",
+                 "display_price_wei": 0, "display_per_wallet": 2,
+                 "display_start_ts": start, "display_end_ts": start + 86400},
+            ],
+        }
+        ctx = self._ctx()
+        card = bot.draft_kb(did, draft)
+        checked = [button.text for button in self._buttons(card) if button.text.startswith("✅")]
+        self.assertTrue(any("PUBLIC" in text for text in checked))
+        self.assertFalse(any("TREASURY" in text for text in checked))
+        with mock.patch.dict(bot.DRAFTS, {did: draft}, clear=True), \
+                mock.patch.dict(bot.MINTS, {}, clear=True), \
+                mock.patch.object(bot, "_next_id", [1]), \
+                mock.patch.object(bot, "save_drafts"), \
+                mock.patch.object(bot, "persist"), \
+                mock.patch.object(bot, "start_watcher"), \
+                mock.patch.object(bot, "_draft_checks", new=mock.AsyncMock(return_value=([], []))):
+            await self._tap(ctx, f"wsel:{did}")
+            text, markup = self.sent[-1]
+            callbacks = [button.callback_data for button in self._buttons(markup)]
+            self.assertIn(self.addrs[0], text)
+            self.assertIn(self.addrs[1], text)
+            self.assertIn(f"wt:{did}:0", callbacks)
+            self.assertIn(f"wt:{did}:1", callbacks)
+            self.assertIn("turn that wallet off", text)
+            await self._tap(ctx, f"wt:{did}:0")
+            self.assertEqual(draft["wex"], [self.addrs[0].lower()])
+            self.sent.clear()
+            await self._tap(ctx, f"dsched:{did}")
+            _text, markup = self.sent[-1]
+            self.assertIn(f"wconfirm:{did}", [b.callback_data for b in self._buttons(markup)])
+            await self._tap(ctx, f"wconfirm:{did}")
+            record = bot.MINTS[1]
+            self.assertIn(self.addrs[0].lower(), record["wex"])
+            self.assertNotIn(self.addrs[1].lower(), record["wex"])
+            self.assertEqual(record["phase"], "public")
+            self.assertEqual(record["per_wallet"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
