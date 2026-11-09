@@ -60,6 +60,30 @@ class WalletFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(f"saved {made}", reveal)
                 self.assertNotIn("of " + str(made), reveal)
 
+    async def test_solana_generate_saves_a_key_the_bot_can_sign_with(self):
+        for run in range(RUNS):
+            with self.subTest(run=run):
+                _store(self)
+                uid = 400 + run
+                update = _update("1", uid)
+                ctx = SimpleNamespace(
+                    user_data={"await": ("wgen_qty", "solana")},
+                    bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1))),
+                )
+                with patch.object(bot, "show_wallets", new=AsyncMock()):
+                    await bot.on_text(update, ctx)
+                self.assertEqual(wallets.count(uid), 1)
+                entries = wallets.signing_entries([uid], chain="solana")
+                self.assertEqual(len(entries), 1)
+                _owner, _label, address, secret, qty = entries[0]
+                from acobot import solana
+                self.assertEqual(solana.public_key(secret), address)
+                self.assertEqual(qty, 1)
+                self.assertEqual(wallets.signing_entries([uid], chain="ethereum"), [])
+                reveal = update.message.reply_text.await_args.args[0]
+                self.assertIn("saved 1.", reveal)
+                self.assertIn(address, reveal)
+
     async def test_import_one_key_then_reject_the_duplicate(self):
         for run in range(RUNS):
             with self.subTest(run=run):
