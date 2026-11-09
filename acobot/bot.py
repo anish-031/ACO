@@ -283,19 +283,27 @@ def _when(ts):
     """'2026-10-27 09:45 UTC (3:15pm GMT+5:45)' from unix seconds."""
     if not ts:
         return "unknown"
-    u = datetime.fromtimestamp(int(ts), UTC)
+    try:
+        u = datetime.fromtimestamp(int(ts), UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "unknown"
     k = u.astimezone(KTM)
     hour = k.strftime("%I:%M%p").lstrip("0").lower()
     return f"{u.strftime('%Y-%m-%d %H:%M')} UTC ({k.strftime('%Y-%m-%d')} {hour} GMT+5:45)"
 
 
 def _phase_status(start_ts, end_ts):
-    if not start_ts:
+    try:
+        start = int(start_ts) if start_ts else 0
+        end = int(end_ts) if end_ts else 0
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if not start:
         return "unknown"
     now = int(time.time())
-    if end_ts and now >= int(end_ts):
+    if end and now >= end:
         return "ended"
-    if now < int(start_ts):
+    if now < start:
         return "upcoming"
     return "live"
 
@@ -307,7 +315,11 @@ def phase_block(st, selected):
     p = st.get("display_price_wei")
     if p is None:
         p = st.get("price_wei")
-    mp = "FREE" if p == 0 else (f"{p / 1e18:.6f}".rstrip("0").rstrip(".") + " ETH" if p is not None else "not detected")
+    try:
+        p_num = None if p is None else int(p)
+    except (TypeError, ValueError):
+        p_num = None
+    mp = "FREE" if p_num == 0 else (f"{p_num / 1e18:.6f}".rstrip("0").rstrip(".") + " ETH" if p_num is not None else "not detected")
     per = st.get("display_per_wallet")
     if per is None:
         per = st.get("per_wallet")
@@ -345,21 +357,54 @@ def fmt_ts(ts):
     """All mint times are UTC. Stored as unix seconds, displayed with the UTC label."""
     if not ts:
         return "unknown"
-    return datetime.fromtimestamp(int(ts), UTC).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        return datetime.fromtimestamp(int(ts), UTC).strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "unknown"
 
 
 def esc(x):
     return html.escape(str(x))
 
 
+BUTTON_TEXT_LIMIT = 64
+
+
+def clip_button(text, limit=BUTTON_TEXT_LIMIT):
+    """Telegram rejects an inline button whose label is longer than 64 characters."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text or "option"
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _gas_view(gas):
+    """('auto'|'high'|'custom', numeric limit or None). Never raises."""
+    if gas in (None, "auto"):
+        return "auto", None
+    try:
+        n = int(gas)
+    except (TypeError, ValueError):
+        return "custom", None
+    if n == 500000:
+        return "high", n
+    return "custom", n
+
+
 def fmt_gwei(wei):
-    return f"{wei / 1e9:.2f} gwei"
+    try:
+        return f"{float(wei) / 1e9:.2f} gwei"
+    except (TypeError, ValueError):
+        return "unknown gwei"
 
 
 def fmt_count(n):
     if n is None:
         return "not detected"
-    return f"{n:,}"
+    try:
+        return f"{int(n):,}"
+    except (TypeError, ValueError):
+        return esc(n)
 
 
 def fee_cost_s(d, eth_cost):
@@ -371,16 +416,23 @@ def fee_cost_s(d, eth_cost):
 
 
 def fee_block(d):
-    fees = d.get("fees")
-    if not fees:
+    fees = d.get("fees") if isinstance(d.get("fees"), dict) else None
+    rows = (fees or {}).get("rows") if isinstance((fees or {}).get("rows"), dict) else None
+    if not rows:
         return ["fee estimates unavailable right now"]
     lines = []
     sel = d.get("speed", "fast")
     for k in ("slow", "medium", "fast", "superfast"):
-        r = fees["rows"][k]
+        r = rows.get(k)
+        if not isinstance(r, dict):
+            continue
         mark = "> " if k == sel else "  "
-        lines.append(f"{mark}{SPEED_EMOJI[k]} {r['label']:<11} {fee_cost_s(d, r['cost_eth'])}")
-    return lines
+        try:
+            cost = fee_cost_s(d, r["cost_eth"])
+        except (KeyError, TypeError, ValueError):
+            cost = "n/a"
+        lines.append(f"{mark}{SPEED_EMOJI[k]} {str(r.get('label') or k):<11} {cost}")
+    return lines or ["fee estimates unavailable right now"]
 
 
 def _selected_index(d, items):
@@ -508,7 +560,14 @@ def qty_cap(d):
     """Most NFTs one wallet mints per tx: the detected per-wallet limit, else 20. No-arg mints are fixed at 1."""
     if _fixed_call(d):
         return 1
-    return int(d.get("per_wallet") or QTY_NO_LIMIT_CAP)
+    raw = d.get("per_wallet")
+    if not raw:
+        return QTY_NO_LIMIT_CAP
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return QTY_NO_LIMIT_CAP
+    return n if n > 0 else QTY_NO_LIMIT_CAP
 
 
 def qty_of(d):
@@ -519,9 +578,11 @@ def qty_limit_line(d):
     if _fixed_call(d):
         return "fixed amount per call, qty 1"
     cap = qty_cap(d)
+    shown = min(cap, QTY_NO_LIMIT_CAP)
     if d.get("per_wallet"):
-        return f"per-wallet limit: {d['per_wallet']} (pick up to {cap})"
-    return f"no limit detected (pick up to {cap})"
+        extra = f"; on-chain limit is {d['per_wallet']}" if cap > shown else ""
+        return f"per-wallet limit: {d['per_wallet']} (pick up to {shown}{extra})"
+    return f"no limit detected (pick up to {shown})"
 
 
 def cost_line(d):
@@ -533,15 +594,19 @@ def cost_line(d):
         row = fees["rows"].get(d.get("speed", "fast"))
         if row:
             gas_s = "est gas ~" + fee_cost_s(d, row["cost_eth"]).lstrip("~")
-    if price is None:
+    try:
+        price_num = None if price is None else int(price)
+    except (TypeError, ValueError):
+        price_num = None
+    if price_num is None:
         return f"cost per wallet: price not set, {gas_s}"
-    mint_s = "free" if price == 0 else f"{price * q / 1e18:g} ETH ({q} × {price / 1e18:g})"
+    mint_s = "free" if price_num == 0 else f"{price_num * q / 1e18:g} ETH ({q} × {price_num / 1e18:g})"
     return f"cost per wallet: {mint_s} + {gas_s}"
 
 
 def qty_rows(did, d):
-    cap = qty_cap(d)
-    cur = qty_of(d)
+    cap = min(qty_cap(d), QTY_NO_LIMIT_CAP)
+    cur = min(qty_of(d), cap)
     rows, row = [], []
     for n in range(1, cap + 1):
         row.append(B(("✅" if n == cur else "") + str(n), callback_data=f"dq:{did}:{n}"))
@@ -567,7 +632,11 @@ def draft_text(d):
     selected_stage = d.get("_selected_stage")
     chain = d.get("chain", CHAIN_NAME)
     price = d.get("price_wei")
-    price_s = "free" if price == 0 else (f"{price / 1e18:g} ETH" if price is not None else "not detected")
+    try:
+        price_num = None if price is None else int(price)
+    except (TypeError, ValueError):
+        price_num = None
+    price_s = "free" if price_num == 0 else (f"{price_num / 1e18:g} ETH" if price_num is not None else "not detected")
     start, end = d.get("start_ts"), d.get("end_ts")
     opens = fmt_ts(start) if start else "not detected"
     closes = fmt_ts(end) if end else "no end set"
@@ -578,12 +647,15 @@ def draft_text(d):
     phases = d.get("phases") or []
     phase_now = d.get("phase") or ("public" if d.get("seadrop") else (phases[0] if phases else "single phase"))
     gas = d.get("gas_limit", "auto")
-    if gas in (None, "auto"):
+    gas_kind, gas_n = _gas_view(gas)
+    if gas_kind == "auto":
         gas_s = GAS_LABEL["auto"]
-    elif int(gas) == 500000:
+    elif gas_kind == "high":
         gas_s = GAS_LABEL["high"]
+    elif gas_n is None:
+        gas_s = GAS_LABEL["custom"]
     else:
-        gas_s = f"{GAS_LABEL['custom']} ({int(gas):,} gas)"
+        gas_s = f"{GAS_LABEL['custom']} ({gas_n:,} gas)"
     name = esc(d.get("name") or "unnamed contract")
     status = []
     if d.get("paused") is not None:
@@ -599,7 +671,7 @@ def draft_text(d):
         ident_lines.append(f"owner: <code>{esc(d['owner'])}</code>")
     lines = [
         f"🎯 <b>{name}</b>",
-        f"<code>{esc(d['contract'])}</code>",
+        f"<code>{esc(d.get('contract') or '')}</code>",
         f"🌐 chain: {esc(chain)}   📦 source: {esc(d.get('source', 'bytecode'))}",
     ]
     if d.get("abi_source"):
@@ -698,7 +770,7 @@ def draft_text(d):
     if d.get("fee_recipient"):
         lines.append(f"fee recipient: <code>{esc(d['fee_recipient'])}</code>")
     lines += ["", "<b>⛽ GAS</b>", f"limit: {esc(gas_s)}"]
-    hint_key = "auto" if gas in (None, "auto") else ("high" if int(gas) == 500000 else "custom")
+    hint_key = gas_kind if gas_kind in GAS_HINT else "custom"
     lines.append("<i>" + esc(GAS_HINT[hint_key]) + "</i>")
     # Telegram HTML rejects a bare ">" (the selected-speed marker) inside <pre>.
     lines.append("<pre>" + esc("\n".join(fee_block(d))) + "</pre>")
@@ -730,14 +802,14 @@ def draft_kb(did, d):
         sel_i = _selected_index(d, [(st.get("chain_key") or st.get("key"),) for st in sched])
         prow = []
         for i, st in enumerate(sched):
-            lbl = (st.get("label") or _phase_label(st.get("chain_key") or st.get("key") or "public")).replace(" (need allowlist spot)", "")
-            prow.append(B(("✅ " if i == sel_i else "") + lbl, callback_data=f"dph:{did}:{i}"))
+            raw = (st.get("label") or _phase_label(st.get("chain_key") or st.get("key") or "public")).replace(" (need allowlist spot)", "")
+            prow.append(B(clip_button(("✅ " if i == sel_i else "") + raw), callback_data=f"dph:{did}:{i}"))
         for i in range(0, len(prow), 2):
             rows.append(prow[i:i + 2])
     elif not rows and d.get("phases") and len(d["phases"]) > 1:
         stage_list = [{"key": p} for p in d.get("phases") or []]
         sel_i = _selected_index(d, [(st.get("key"),) for st in stage_list])
-        prow = [B(("✅ " if n == sel_i else "") + _phase_label(st.get("key")), callback_data=f"dph:{did}:{n}")
+        prow = [B(clip_button(("✅ " if n == sel_i else "") + _phase_label(st.get("key"))), callback_data=f"dph:{did}:{n}")
                 for n, st in enumerate(stage_list)]
         for i in range(0, len(prow), 2):
             rows.append(prow[i:i + 2])
@@ -969,7 +1041,7 @@ async def cmd_allow(update: Update, ctx):
         return
     arg = (ctx.args[0] if ctx.args else "").strip()
     if not arg:
-        await update.message.reply_text("usage: /allow <username|user_id>")
+        await update.message.reply_text("usage: /allow @username or a numeric user id")
         return
     if arg.startswith("@") or not arg.lstrip("-").isdigit():
         uname = "@" + arg.lstrip("@")
@@ -1258,15 +1330,23 @@ async def start_draft(chat_id, ctx, contract, chain_name=None):
     did = max(DRAFTS.keys(), default=0) + 1
     DRAFTS[did] = d
     save_drafts()
-    panel = draft_text(d)
-    markup = draft_kb(did, d)
+    try:
+        panel = draft_text(d)
+        markup = draft_kb(did, d)
+    except Exception:
+        log.exception("mint panel failed to render")
+        await ctx.bot.send_message(
+            chat_id, "the contract was read, but the panel failed to render. send /start and try again.")
+        return
     try:
         await ctx.bot.send_message(chat_id, panel, reply_markup=markup)
     except BadRequest as exc:
-        if "parse" not in str(exc).lower() and "entity" not in str(exc).lower():
-            raise
-        log.warning("mint panel rejected as HTML: %s", exc)
-        await ctx.bot.send_message(chat_id, esc(panel), reply_markup=markup)
+        log.warning("mint panel rejected: %s", exc)
+        try:
+            await ctx.bot.send_message(chat_id, esc(panel)[:3900])
+        except BadRequest:
+            await ctx.bot.send_message(
+                chat_id, "the contract was read, but Telegram refused the panel. send /start and try again.")
     if not d.get("mint_sig") and not d.get("seadrop"):
         await ctx.bot.send_message(chat_id, "no mint call found on this contract. want me to dig the web for the real mint contract? say dig and the project name.")
 
@@ -1914,7 +1994,16 @@ async def on_callback(update: Update, ctx):
     elif data.startswith("cw:"):
         if uid != ADMIN_ID:
             return
-        _, mflag, kind, name, chain = data.split(":", 4)
+        parts = data.split(":")
+        if len(parts) == 3:
+            _, mflag, token = parts
+            picked = (ctx.user_data.get("cawatch_pick") or {}).pop(token, None)
+            if not picked:
+                await ctx.bot.send_message(chat_id, "that choice expired. send the /cawatch add command again.")
+                return
+            kind, name, chain = picked
+        else:
+            _, mflag, kind, name, chain = data.split(":", 4)
         from acobot import cawatch as cwmod
         if mflag == "a":
             # ask for the fund amount next
@@ -1928,7 +2017,7 @@ async def on_callback(update: Update, ctx):
             await _edit_or_send(None, chat_id, q.message.message_id, str(e), None, ctx)
             return
         await _edit_or_send(None, chat_id, q.message.message_id,
-                            f"armed: {kind} {name} = manual. CA drops -> u get pinged, u confirm every buy.", None, ctx)
+                            f"armed: {esc(kind)} {esc(name)} = manual. CA drops -> u get pinged, u confirm every buy.", None, ctx)
     elif data.startswith("snd:src:"):
         pick = data[8:]
         ctx.user_data["send_wiz"] = {"step": "chain", "src": pick}
@@ -2547,11 +2636,11 @@ async def cmd_cawatch(update: Update, ctx):
         if not rows:
             await update.message.reply_text(
                 "no CA watchers yet.\n\n"
-                "/cawatch add x <handle> manual|auto [fund eth] [chain]\n"
-                "/cawatch add dc <invite or server id> manual|auto [fund eth] [chain]\n"
-                "/cawatch add tg <group/channel id or @link> manual|auto [fund eth] [chain]\n"
+                "/cawatch add x HANDLE manual or auto [fund eth] [chain]\n"
+                "/cawatch add dc INVITE manual or auto [fund eth] [chain]\n"
+                "/cawatch add tg GROUP manual or auto [fund eth] [chain]\n"
                 "auto = buys/mints instantly up to fund (max 0.05 eth). manual = u get pinged and confirm.\n"
-                "/cawatch list | /cawatch remove <name>")
+                "/cawatch list | /cawatch remove NAME")
             return
         lines = [f"{s['kind']} {s['name']}: {s['mode']}" + (f" cap {s['cap_eth']} eth, chain {s['chain']}" if s['mode'] == 'auto' else "") for s in rows]
         await update.message.reply_text("\n".join(lines))
@@ -2568,11 +2657,14 @@ async def cmd_cawatch(update: Update, ctx):
         cap = args[4] if len(args) > 4 else "0"
         chain = args[5].lower() if len(args) > 5 else "robinhood"
         if mode not in ("manual", "auto"):
-            # no mode given: show the picker buttons
-            kb = M([[B("manual (confirm each)", callback_data=f"cw:m:{kind}:{name}:{chain}"),
-                     B("auto (instant)", callback_data=f"cw:a:{kind}:{name}:{chain}")]])
+            # no mode given: show the picker buttons. names stay out of callback_data
+            # because Telegram rejects anything over 64 bytes.
+            token = f"{int(time.time() * 1000) % 10**12:x}"
+            ctx.user_data.setdefault("cawatch_pick", {})[token] = (kind, name, chain)
+            kb = M([[B("manual (confirm each)", callback_data=f"cw:m:{token}"),
+                     B("auto (instant)", callback_data=f"cw:a:{token}")]])
             await update.message.reply_text(
-                f"how should {kind} {name} act when a CA drops?", reply_markup=kb)
+                f"how should {esc(kind)} {esc(name)} act when a CA drops?", reply_markup=kb)
             return
         try:
             s = cawatch.add_source(kind, name, mode, cap_eth=float(cap), chain=chain)
@@ -2581,24 +2673,24 @@ async def cmd_cawatch(update: Update, ctx):
             return
         if kind == "x":
             await update.message.reply_text(
-                f"watching x {name}: {s['mode']}.\nX posts are scanned by folk's monitors; a CA there pings u here, then /trade or /outmint. "
+                f"watching x {esc(name)}: {esc(s['mode'])}.\nX posts are scanned by folk's monitors; a CA there pings u here, then /trade or /outmint. "
                 + ("auto fires up to " + str(s['cap_eth']) + " eth the moment a group CA lands, no confirm." if s['mode'] == 'auto' else "nothing buys without ur confirm."))
             return
         if kind in ("dc", "tg", "group"):
             if kind == "dc":
                 await update.message.reply_text(
-                    f"dc {name} saved as {s['mode']}. discord needs a bot invited to that server to read it live; "
+                    f"dc {esc(name)} saved as {esc(s['mode'])}. discord needs a bot invited to that server to read it live; "
                     "add @acobot to the server (read messages perm) and the CA alerts flow through here. "
                     + (f"auto capped at {s['cap_eth']} eth." if s['mode'] == 'auto' else "manual: u confirm each buy."))
                 return
             if kind == "tg":
                 await update.message.reply_text(
-                    f"tg {name} saved as {s['mode']}. "
+                    f"tg {esc(name)} saved as {esc(s['mode'])}. "
                     + ("for public channels/groups the bot must be a member: add @acobot there, it reads CAs and acts here. "
                        if s['mode'] else "add @acobot to that group/channel so it can read messages. ")
                     + (f"auto buys up to {s['cap_eth']} eth instantly, no confirm." if s['mode'] == 'auto' else "manual: u confirm each buy."))
                 return
-    await update.message.reply_text("usage: /cawatch add x <handle> manual|auto [cap eth] [chain] | /cawatch add group <name> ... | /cawatch list | /cawatch remove <name>")
+    await update.message.reply_text("usage: /cawatch add x HANDLE manual or auto [cap eth] [chain] | /cawatch add group NAME ... | /cawatch list | /cawatch remove NAME")
 
 
 async def cawatch_on_group_text(update: Update, ctx):
@@ -2627,7 +2719,7 @@ async def cawatch_on_group_text(update: Update, ctx):
                     chain = CFG.chains.get(s.get("chain", "robinhood"))
                     wallet = wallets.main_wallet_for(ADMIN_ID, s.get("chain", "robinhood"))
                     if not chain or not wallet:
-                        await ctx.bot.send_message(ADMIN_ID, f"CA {ca} from {s['name']}: auto-buy skipped, no {s.get('chain')} wallet. nothing was spent.")
+                        await ctx.bot.send_message(ADMIN_ID, f"CA {esc(ca)} from {esc(s['name'])}: auto-buy skipped, no {esc(s.get('chain'))} wallet. nothing was spent.")
                         continue
                     try:
                         from acobot import tokenbuy
@@ -2636,17 +2728,17 @@ async def cawatch_on_group_text(update: Update, ctx):
                         ok, tx = await asyncio.to_thread(tokenbuy.execute_prepared, prepared,
                                                          wallets.signing_entries([ADMIN_ID], only={wallet["address"].lower()})[0][3],
                                                          RPC(chain, broadcast=True))
-                        await ctx.bot.send_message(ADMIN_ID, f"AUTO-BUY from {s['name']}: {'submitted ' + str(tx)[:20] if ok else 'failed, nothing spent'} ({s['cap_eth']} eth, {ca})")
+                        await ctx.bot.send_message(ADMIN_ID, f"AUTO-BUY from {esc(s['name'])}: {esc('submitted ' + str(tx)[:20] if ok else 'failed, nothing spent')} ({esc(s['cap_eth'])} eth, {esc(ca)})")
                     except Exception:
                         log.exception("cawatch auto-buy failed")
-                        await ctx.bot.send_message(ADMIN_ID, f"CA {ca} from {s['name']}: auto-buy quote failed, nothing was spent.")
+                        await ctx.bot.send_message(ADMIN_ID, f"CA {esc(ca)} from {esc(s['name'])}: auto-buy quote failed, nothing was spent.")
                 else:
                     await ctx.bot.send_message(ADMIN_ID,
-                        f"CA spotted in group {s['name']}: <code>{ca}</code>\nreact with /trade to buy manually.")
+                        f"CA spotted in group {esc(s['name'])}: <code>{esc(ca)}</code>\nreact with /trade to buy manually.")
             for mint in sol:
                 if cawatch.is_new("group", s["name"], mint):
                     cawatch.mark_seen("group", s["name"], mint)
-                    await ctx.bot.send_message(ADMIN_ID, f"SOL mint spotted in group {s['name']}: <code>{mint}</code>\n/trade to buy manually (sol auto not supported).")
+                    await ctx.bot.send_message(ADMIN_ID, f"SOL mint spotted in group {esc(s['name'])}: <code>{esc(mint)}</code>\n/trade to buy manually (sol auto not supported).")
     except Exception:
         log.exception("cawatch group scan failed")
 
@@ -2767,7 +2859,7 @@ async def on_text(update: Update, ctx):
             await update.message.reply_text(str(e))
             return
         await update.message.reply_text(
-            f"ARMED auto: {kind} {name} buys up to {s['cap_eth']} eth on {chain} instantly when a CA drops. no confirm.")
+            f"ARMED auto: {esc(kind)} {esc(name)} buys up to {esc(s['cap_eth'])} eth on {esc(chain)} instantly when a CA drops. no confirm.")
         return
     if st and st[0] == "trade_ca":
         try:
@@ -4097,7 +4189,7 @@ async def cmd_sweep(update: Update, ctx):
     if not contract:
         fired = [m for m in MINTS.values() if m.get("status") == "fired" and m.get("chain") == main["chain"]]
         if not fired:
-            await update.message.reply_text("no fired mint on this chain. use /sweep <contract address> or /sweep nft all.")
+            await update.message.reply_text("no fired mint on this chain. use /sweep CONTRACT or /sweep nft all.")
             return
         contract = fired[-1]["contract"]
     if not all_mode and not valid_address(contract):
@@ -5079,7 +5171,7 @@ async def cmd_watchlist(update: Update, ctx):
             await update.message.reply_text("only the admin can add to the watchlist.")
             return
         if len(args) < 2 or not valid_address(args[1]):
-            await update.message.reply_text("usage: /watchlist add <contract address> [chain]")
+            await update.message.reply_text("usage: /watchlist add CONTRACT [chain]")
             return
         cn = args[2].lower() if len(args) > 2 and args[2].lower() in CFG.chains else CHAIN_NAME
         contract = args[1]
@@ -5440,7 +5532,7 @@ async def cmd_outmint(update: Update, ctx):
         auto = True
         action = action[:-5]
     if action not in ("cast", "melt"):
-        await update.message.reply_text("usage: /outmint cast <bar id> [count] | /outmint melt <bar id> [count] | add :auto to skip confirm")
+        await update.message.reply_text("usage: /outmint cast BAR_ID [count] | /outmint melt BAR_ID [count] | add :auto to skip confirm")
         return
     if len(args) < 2 or not args[1].isdigit():
         await update.message.reply_text("send the bar id, e.g. /outmint cast 5 2")
@@ -5601,7 +5693,7 @@ async def cmd_snipeprice(update: Update, ctx):
         await _prepare_token_panel(update.effective_chat.id, ctx, args[0])
         return
     if len(args) < 2 or not valid_address(args[0]):
-        await update.message.reply_text("usage: /snipeprice <contract> <max price in ETH> [chain]")
+        await update.message.reply_text("usage: /snipeprice CONTRACT MAX_ETH [chain]")
         return
     try:
         max_eth = float(args[1])
