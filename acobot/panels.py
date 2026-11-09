@@ -60,8 +60,8 @@ def label_of(s):
 
 def wallet_step_lines(d, allw):
     """allw: [(owner, label, address, qty)]. Returns HTML lines for the select panel."""
-    excl = {a.lower() for a in (d.get("wex") or [])}
-    chosen = [w for w in allw if w[2].lower() not in excl]
+    excl = {str(a).lower() for a in (d.get("wex") or [])}
+    chosen = [w for w in allw if str(w[2]).lower() not in excl]
     lines = [f"🎯 <b>{esc(d.get('name') or 'mint')}</b> on {esc(d.get('chain', 'ethereum'))}",
              f"<code>{esc(d.get('contract', ''))}</code>", ""]
     if not allw:
@@ -70,7 +70,7 @@ def wallet_step_lines(d, allw):
         n = len(chosen)
         lines.append(f"<b>minting from {n} wallet{'s' if n != 1 else ''}</b> (of {len(allw)} on this chain)")
         for owner, label, addr, qty in allw:
-            mark = "✅" if addr.lower() not in excl else "⬜"
+            mark = "✅" if str(addr).lower() not in excl else "⬜"
             lines.append(f"{mark} {esc(label)} {esc(mask(addr))}  x{qty}")
     return lines
 

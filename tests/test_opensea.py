@@ -455,10 +455,11 @@ class GatedScheduleTests(unittest.IsolatedAsyncioTestCase):
         text, markup = edit.await_args.args[3:5]
         buttons = [button for row in markup.inline_keyboard for button in row]
         self.assertIn("Wallet 1", text)
-        self.assertIn("can mint", text)
+        self.assertIn("minting from 1 wallet", text)
         self.assertFalse(any(button.callback_data == "bsched:77" for button in buttons))
         self.assertTrue(any(button.callback_data == "dsched:77" for button in buttons))
-        self.assertTrue(any(button.callback_data == f"wt:77:{entries[0][2]}" for button in buttons))
+        self.assertTrue(any(button.callback_data == "wt:77:0" for button in buttons))
+        self.assertTrue(any(button.callback_data == "wchk:77" for button in buttons))
         self.assertTrue(all(len(button.text) <= 64 for button in buttons))
 
     async def test_legacy_eligibility_report_never_changes_wallet_selection(self):

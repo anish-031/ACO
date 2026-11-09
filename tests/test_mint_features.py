@@ -175,9 +175,11 @@ class ForceMintTests(unittest.IsolatedAsyncioTestCase):
             message=SimpleNamespace(chat_id=1, message_id=2),
         )
         ctx = SimpleNamespace(user_data={}, bot=SimpleNamespace(send_message=mock.AsyncMock()))
+        wallet = (bot.ADMIN_ID, "Wallet 1", "0x" + "ab" * 20, 1)
         with mock.patch.dict(bot.DRAFTS, {31: draft}, clear=True), \
                 mock.patch.object(bot, "allowed", return_value=True), \
                 mock.patch.object(bot, "username_allowed", return_value=False), \
+                mock.patch.object(bot, "mint_wallets", return_value=[wallet]), \
                 mock.patch.object(bot, "run_schedule_check", new=mock.AsyncMock()) as schedule, \
                 mock.patch.object(bot, "show_wallet_step", new=mock.AsyncMock()) as picker:
             await bot.on_callback(SimpleNamespace(callback_query=query), ctx)
