@@ -458,7 +458,7 @@ class GatedScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("can mint", text)
         self.assertFalse(any(button.callback_data == "bsched:77" for button in buttons))
         self.assertTrue(any(button.callback_data == "dsched:77" for button in buttons))
-        self.assertTrue(any(button.callback_data == "wt:77:0" for button in buttons))
+        self.assertTrue(any(button.callback_data == f"wt:77:{entries[0][2]}" for button in buttons))
         self.assertTrue(all(len(button.text) <= 64 for button in buttons))
 
     async def test_legacy_eligibility_report_never_changes_wallet_selection(self):

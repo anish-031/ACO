@@ -369,6 +369,7 @@ def esc(x):
 
 
 BUTTON_TEXT_LIMIT = 64
+WALLET_CHECK_TIMEOUT = 6
 
 
 def clip_button(text, limit=BUTTON_TEXT_LIMIT):
@@ -801,6 +802,11 @@ def short_addr(addr):
     if len(text) <= 13:
         return text
     return text[:6] + "…" + text[-4:]
+
+
+def addr_button(label, address, callback_data):
+    """A wallet button Telegram will accept. Full addresses make the label too long."""
+    return B(clip_button(f"{label} {short_addr(address)}"), callback_data=callback_data)
 
 
 def wallet_blocks_schedule(verdict):
@@ -1752,13 +1758,23 @@ async def on_callback(update: Update, ctx):
     elif data.startswith("wt:"):
         if uid != ADMIN_ID:
             return
-        _, did, i = data.split(":"); did = int(did); i = int(i)
+        parts = data.split(":")
+        did = int(parts[1])
+        token = parts[2] if len(parts) > 2 else ""
         d = DRAFTS.get(did)
-        if d is None: return
+        if d is None:
+            return
         allw = mint_wallets(d)
-        if i < len(allw):
-            ex = set(d.get("wex") or []); a = allw[i][2].lower()
-            ex.symmetric_difference_update({a})
+        target = None
+        if token.isdigit() and len(token) <= 3:
+            index = int(token)
+            if index < len(allw):
+                target = allw[index][2]
+        else:
+            target = token
+        if target:
+            ex = set(d.get("wex") or [])
+            ex.symmetric_difference_update({str(target).lower()})
             d["wex"] = sorted(ex)
             save_drafts()
         await show_wallet_step(chat_id, ctx, did, q.message.message_id)
@@ -1864,7 +1880,7 @@ async def on_callback(update: Update, ctx):
                 a2 = (w2["address"] or "").lower()
                 if a2 in seen: continue
                 seen.add(a2)
-                rows.append([B(f"{w2['label']} ({wallets.mask(w2['address'])})", callback_data=f"sw:src:{chain_name}:{a2}")])
+                rows.append([addr_button(w2["label"], w2["address"], f"sw:src:{chain_name}:{a2}")])
             await _edit_or_send(None, chat_id, q.message.message_id, "sweep from which wallet?", M(rows), ctx)
             return
             main = wallets.main_wallet(uid)
@@ -2224,7 +2240,7 @@ async def on_callback(update: Update, ctx):
                 if not compatible or a in seen or a in source_addresses:
                     continue
                 seen.add(a)
-                rows.append([B(f"{w2['label']} ({wallets.mask(w2['address'])})", callback_data=f"snd:tgl:{w2['address']}")])
+                rows.append([addr_button(w2["label"], w2["address"], f"snd:tgl:{w2['address']}")])
             rows.append([B("done", callback_data="snd:tgl:done"), B("cancel", callback_data="snd:tgl:cancel")])
             await _edit_or_send(None, chat_id, q.message.message_id, "tap every wallet u want to send TO, then done:", M(rows), ctx)
             return
@@ -2292,7 +2308,7 @@ async def on_callback(update: Update, ctx):
                 continue
             seen.add(a)
             mark = "✅ " if a in [m.lower() for m in multi] else ""
-            rows.append([B(f"{mark}{w2['label']} ({wallets.mask(w2['address'])})", callback_data=f"snd:tgl:{w2['address']}")])
+            rows.append([addr_button(f"{mark}{w2['label']}", w2["address"], f"snd:tgl:{w2['address']}")])
         rows.append([B("done", callback_data="snd:tgl:done"), B("cancel", callback_data="snd:tgl:cancel")])
         await _edit_or_send(None, chat_id, q.message.message_id, f"{len(multi)} selected. tap to toggle, then done:", M(rows), ctx)
     elif data.startswith("snd:gas:"):
@@ -2937,7 +2953,7 @@ async def on_text(update: Update, ctx):
                 if not compatible or a2 in seen2 or a2 in source_addresses or a2 == src_addr:
                     continue
                 seen2.add(a2)
-                rows.append([B(f"to {w2['label']} ({wallets.mask(w2['address'])})", callback_data=f"snd:dst:{w2['address']}")])
+                rows.append([addr_button(f"to {w2['label']}", w2["address"], f"snd:dst:{w2['address']}")])
         else:
             rows.append([B("paste wallet address", callback_data="snd:dst:CA")])
         if not rows:
@@ -3060,7 +3076,7 @@ async def on_text(update: Update, ctx):
                 a2 = (w2["address"] or "").lower()
                 if a2 in seen: continue
                 seen.add(a2)
-                rows.append([B(f"{w2['label']} ({wallets.mask(w2['address'])})", callback_data=f"sw:src:{chain_name}:{a2}")])
+                rows.append([addr_button(w2["label"], w2["address"], f"sw:src:{chain_name}:{a2}")])
             await update.message.reply_text("sweep from which wallet?", reply_markup=M(rows))
             return
         if mode == "sweep_destination":
@@ -3111,35 +3127,54 @@ async def on_text(update: Update, ctx):
         if not text.isdigit() or not 1 <= int(text) <= 10:
             await update.message.reply_text("send a number 1-10, or /cancel.")
             return
-        n = int(text)
+        asked = int(text)
         ctx.user_data.pop("await", None)
-        evm_all = arg == "evm_all"
-        chain_pick = "ethereum" if evm_all else (arg or "ethereum")
-        room = wallets.MAX_WALLETS - len(wallets.list_wallets(uid))
+        chain_pick = "ethereum" if arg == "evm_all" else (arg or "ethereum")
+        scope = "all EVM chains" if arg == "evm_all" else chain_pick
+        room = wallets.MAX_WALLETS - wallets.count(uid)
         if room <= 0:
             await update.message.reply_text(f"wallet cap ({wallets.MAX_WALLETS}) reached. remove one first.")
             return
-        n = min(n, room)
-        lines = []
+        n = min(asked, room)
         try:
             await update.message.delete()
         except Exception:
             pass
+        saved, error = [], None
         for _ in range(n):
-            priv, addr = await asyncio.to_thread(wallets.generate_wallet, chain_pick)
-            if evm_all:
-                for cp in wallets.EVM_CHAINS:
-                    try: await asyncio.to_thread(wallets.add_wallet, uid, priv, 1, cp)
-                    except ValueError: pass
-                lines.append(f"<code>{addr}</code> —&gt; <code>{priv}</code>  (EVM: all chains)")
-            else:
-                _a, masked, _l = await asyncio.to_thread(wallets.add_wallet, uid, priv, 1, chain_pick)
-                lines.append(f"<code>{addr}</code> —&gt; <code>{priv}</code>")
-        out = "\n".join(lines)
-        await update.message.reply_text(
-            f"🛡 {n} new {chain_pick} wallet(s) generated and saved.\n\n{out}\n\n"
-            "⚠️ this is the ONLY time the keys are shown. save them somewhere safe now, they will never be shown again.")
-        await show_wallets(update.effective_chat.id, ctx, uid)
+            try:
+                priv, addr = await asyncio.to_thread(wallets.generate_wallet, chain_pick)
+                await asyncio.to_thread(wallets.add_wallet, uid, priv, 1, chain_pick)
+                saved.append((addr, priv))
+            except ValueError as exc:
+                error = str(exc)
+                break
+            except Exception as exc:
+                log.exception("wallet generate failed")
+                error = f"could not save a wallet ({type(exc).__name__})"
+                break
+        if not saved:
+            await update.message.reply_text(error or "no wallet was generated. try again or /cancel.")
+            return
+        lines = [f"<code>{esc(addr)}</code> → <code>{esc(priv)}</code>" for addr, priv in saved]
+        note = f"saved {len(saved)} of {asked}. {error}" if error or len(saved) != asked else f"saved {len(saved)}."
+        reveal = (
+            f"🛡 {esc(note)} New {esc(scope)} wallet(s). One key works on every EVM chain.\n\n"
+            + "\n".join(lines)
+            + "\n\n⚠️ this is the ONLY time the keys are shown. save them somewhere safe now."
+        )
+        try:
+            await update.message.reply_text(reveal[:4000])
+        except Exception:
+            log.exception("wallet key reveal failed")
+            await ctx.bot.send_message(
+                update.effective_chat.id,
+                "Wallets were saved, but Telegram rejected the key message. "
+                "Remove them in /wallets and generate again, then copy the keys immediately.")
+        try:
+            await show_wallets(update.effective_chat.id, ctx, uid)
+        except Exception:
+            log.exception("wallet list after generate failed")
         return
     if field == "wallet_multi_count":
         if not text.isdigit() or not (2 <= int(text) <= 20):
@@ -3160,63 +3195,54 @@ async def on_text(update: Update, ctx):
             await update.message.reply_text(f"{len(done_lines) + len(keys)}/{want} so far, send the rest.")
             return
         all_keys = (done_lines + keys)[:want]
-        chains_for_key = list(wallets.EVM_CHAINS) if chain_pick == "evm_all" else [chain_pick or CHAIN_NAME]
+        store_chain = "ethereum" if chain_pick == "evm_all" else (chain_pick or CHAIN_NAME)
         saved, failed = [], []
         for k in all_keys:
             try:
-                addr, masked, _ = await asyncio.to_thread(wallets.add_wallet, uid, k, 1, chains_for_key[0])
-                for cp in chains_for_key[1:]:
-                    try:
-                        await asyncio.to_thread(wallets.add_wallet, uid, k, 1, cp)
-                    except ValueError:
-                        pass
+                _addr, masked, _label = await asyncio.to_thread(wallets.add_wallet, uid, k, 1, store_chain)
                 saved.append(masked)
             except (ValueError, RuntimeError) as e:
-                failed.append(str(e)[:40])
+                failed.append(str(e)[:80])
         ctx.user_data.pop("await", None)
         try:
             await update.message.delete()
         except Exception:
             pass
-        msg = f"added {len(saved)} wallets:\n" + "\n".join(saved)
+        scope = "all EVM chains" if chain_pick == "evm_all" else store_chain
+        msg = f"added {len(saved)} wallet(s) for {scope}:\n" + "\n".join(esc(item) for item in saved)
         if failed:
-            msg += f"\n\n{len(failed)} failed (dup or bad key):\n" + "\n".join(failed[:5])
-        await ctx.bot.send_message(update.effective_chat.id, msg)
+            msg += "\n\n" + f"{len(failed)} failed:\n" + "\n".join(esc(item) for item in failed[:5])
+        await ctx.bot.send_message(update.effective_chat.id, msg[:4000])
+        try:
+            await show_wallets(update.effective_chat.id, ctx, uid)
+        except Exception:
+            log.exception("wallet list after import failed")
         return
     if field == "wallet_key":
         if not is_dm(update):
             return
-        chains_for_key = list(wallets.EVM_CHAINS) if arg == "evm_all" else [arg or CHAIN_NAME]
-        saved, skipped = [], []
-        addr = masked = label = None
-        for cp in chains_for_key:
-            try:
-                addr, masked, label = await asyncio.to_thread(wallets.add_wallet, uid, text, 1, cp)
-                saved.append(cp)
-            except ValueError as e:
-                if "already saved" in str(e):
-                    skipped.append(cp)
-                else:
-                    await update.message.reply_text(f"{e} send it again or /cancel.")
-                    return
-            except RuntimeError as e:
-                await update.message.reply_text(f"cant store keys right now: {e}")
-                return
-        if not saved and not skipped:
-            await update.message.reply_text("couldnt save that key. send it again or /cancel.")
+        store_chain = "ethereum" if arg == "evm_all" else (arg or CHAIN_NAME)
+        try:
+            _addr, masked, label = await asyncio.to_thread(wallets.add_wallet, uid, text, 1, store_chain)
+        except ValueError as e:
+            await update.message.reply_text(f"{e} send it again or /cancel.")
+            return
+        except RuntimeError as e:
+            await update.message.reply_text(f"cant store keys right now: {e}")
             return
         ctx.user_data.pop("await", None)
         try:
             await update.message.delete()
         except Exception:
             pass
-        parts = []
-        if saved:
-            parts.append(f"saved {masked} on {', '.join(saved)}")
-        if skipped:
-            parts.append(f"already on {', '.join(skipped)} (skipped)")
-        parts.append("one key, all EVM chains. set mint amounts in my wallets.")
-        await ctx.bot.send_message(update.effective_chat.id, "\n".join(parts))
+        scope = "every EVM chain" if arg == "evm_all" or store_chain in wallets.EVM_CHAINS else store_chain
+        await ctx.bot.send_message(
+            update.effective_chat.id,
+            f"saved {esc(label)} {esc(masked)} for {esc(scope)}. set the mint amount in /wallets.")
+        try:
+            await show_wallets(update.effective_chat.id, ctx, uid)
+        except Exception:
+            log.exception("wallet list after import failed")
         return
     if field == "wallet_qty":
         if not text.isdigit() or int(text) < 1:
@@ -3765,7 +3791,7 @@ async def show_wallets(chat_id, ctx, uid, msg_id=None):
     lines = []
     for g in grouped:
         is_evm = g["chains"][0] != "solana"
-        chain_txt = "EVM: " + ", ".join(g["chains"]) if is_evm else "SOL"
+        chain_txt = "EVM: all chains" if is_evm else "SOL"
         lines.append(("★ " if g["main"] else "• ") + f"<b>{esc(g['label'])}</b> · {esc(chain_txt)} · x{g['qty']}"
                       + ("  <i>(main)</i>" if g["main"] else "") + f"\n   <code>{esc(g['masked'])}</code>")
     if not ws:
@@ -3831,35 +3857,70 @@ async def _draft_checks(d, selected_only=True):
     return allw, verdicts
 
 
-async def refresh_wallet_report(d):
-    """Store which wallets can mint. A failed read does not mark them ineligible."""
-    note = ""
+def _local_wallet_report(d):
+    """Wallets from the key store. No chain call, so the picker can open immediately."""
     try:
-        allw, verdicts = await _draft_checks(d, selected_only=False)
-    except Exception as exc:
-        log.warning("wallet report failed: %s", type(exc).__name__)
-        allw, verdicts = [], []
-        note = "Wallet check failed. Tap refresh and try again."
+        allw = mint_wallets(d)
+    except Exception:
+        log.exception("could not read saved wallets")
+        allw = []
     excluded = {str(a).lower() for a in d.get("wex") or []}
-    clean = []
-    for verdict in verdicts:
-        if not isinstance(verdict, dict):
-            continue
-        verdict["selected"] = str(verdict.get("address") or "").lower() not in excluded
-        clean.append(verdict)
-    selected = sum(1 for item in clean if item.get("selected"))
-    if not note and not allw:
+    report = []
+    for _owner, label, address, qty in allw:
+        addr = str(address or "")
+        report.append({
+            "label": label, "address": addr, "qty": qty, "verdict": "warn",
+            "eligibility": None, "reasons": [], "selected": addr.lower() not in excluded,
+        })
+    selected = sum(1 for item in report if item["selected"])
+    note = ""
+    if not allw:
         try:
             owners = [ADMIN_ID] + list(getattr(CFG, "whitelist_ids", []) or [])
             note = zero_send_reason(owners, d.get("chain", CHAIN_NAME), excluded, 0) or "No wallets on this chain."
         except Exception:
             note = "No wallets on this chain. Add one in /wallets."
-    elif not note and not selected:
-        note = "Every wallet is skipped. Tap Pick wallets and turn one on."
+    elif not selected:
+        note = "Every wallet is skipped. Tap a wallet to include it."
     d["wallet_count"] = len(allw)
     d["wallet_selected"] = selected
-    d["wallet_report"] = clean
+    d["wallet_report"] = report
     d["wallet_note"] = note
+    return allw
+
+
+async def refresh_wallet_report(d):
+    """Add balance and allowlist results. A failed read keeps the saved wallet list."""
+    try:
+        allw, verdicts = await _draft_checks(d, selected_only=False)
+    except Exception as exc:
+        log.warning("wallet report failed: %s", type(exc).__name__)
+        _local_wallet_report(d)
+        d["wallet_note"] = d.get("wallet_note") or "Wallet check failed. Selection still works."
+        return d
+    if not allw:
+        return _local_wallet_report(d)
+    excluded = {str(a).lower() for a in d.get("wex") or []}
+    by_address = {}
+    for verdict in verdicts:
+        if isinstance(verdict, dict):
+            by_address[str(verdict.get("address") or "").lower()] = verdict
+    report = []
+    for _owner, label, address, qty in allw:
+        addr = str(address or "")
+        verdict = dict(by_address.get(addr.lower()) or {})
+        verdict["label"] = label
+        verdict["address"] = addr
+        verdict["qty"] = qty
+        verdict["selected"] = addr.lower() not in excluded
+        verdict.setdefault("reasons", [])
+        verdict.setdefault("verdict", "warn")
+        report.append(verdict)
+    selected = sum(1 for item in report if item["selected"])
+    d["wallet_count"] = len(allw)
+    d["wallet_selected"] = selected
+    d["wallet_report"] = report
+    d["wallet_note"] = "" if selected else "Every wallet is skipped. Tap a wallet to include it."
     return d
 
 
@@ -3959,16 +4020,7 @@ async def show_wallet_step(chat_id, ctx, did, msg_id=None):
             log.exception("wallet picker fallback failed")
 
 
-async def _show_wallet_step(chat_id, ctx, did, msg_id=None):
-    d = DRAFTS.get(did)
-    if d is None:
-        await ctx.bot.send_message(chat_id, "that draft is gone.")
-        return
-    await refresh_wallet_report(d)
-    try:
-        save_drafts()
-    except Exception:
-        log.exception("could not save the draft while opening wallets")
+def _wallet_picker(did, d):
     view = draft_phase_view(d)
     allw = mint_wallets(d)
     by_address = {str(item.get("address", "")).lower(): item for item in (d.get("wallet_report") or [])}
@@ -3981,7 +4033,7 @@ async def _show_wallet_step(chat_id, ctx, did, msg_id=None):
         lines.append(esc(d.get("wallet_note") or "No wallets on this chain yet. Add one in /wallets first."))
     excluded = {str(a).lower() for a in d.get("wex") or []}
     rows = []
-    for i, (_owner, label, address, qty) in enumerate(allw):
+    for _owner, label, address, qty in allw:
         addr = str(address or "")
         selected = addr.lower() not in excluded
         verdict = by_address.get(addr.lower()) or {}
@@ -3995,13 +4047,37 @@ async def _show_wallet_step(chat_id, ctx, did, msg_id=None):
         lines.append(f"<code>{esc(addr)}</code>")
         if reason and selected:
             lines.append(esc(reason))
-        rows.append([B(
-            clip_button(f"{'✅' if selected else '⬜'} {label} {short_addr(addr)}"),
-            callback_data=f"wt:{did}:{i}")])
+        rows.append([addr_button(f"{'✅' if selected else '⬜'} {label}", addr, f"wt:{did}:{addr}")])
+    if d.get("wallet_note"):
+        lines += ["", esc(d["wallet_note"])]
     lines += ["", ACTION_LINE[mint_action(d)]]
     rows.append([B("all wallets", callback_data=f"wall:{did}")])
     rows.append([action_button(did, d), B("back", callback_data=f"wback:{did}")])
-    await _edit_or_send(None, chat_id, msg_id, "\n".join(lines), M(rows), ctx)
+    return "\n".join(lines), M(rows)
+
+
+async def _show_wallet_step(chat_id, ctx, did, msg_id=None):
+    d = DRAFTS.get(did)
+    if d is None:
+        await ctx.bot.send_message(chat_id, "that draft is gone.")
+        return
+    # Paint the saved wallets before any chain call. A slow RPC must not hide the list.
+    _local_wallet_report(d)
+    text, markup = _wallet_picker(did, d)
+    await _edit_or_send(None, chat_id, msg_id, text, markup, ctx)
+    try:
+        await asyncio.wait_for(refresh_wallet_report(d), timeout=WALLET_CHECK_TIMEOUT)
+    except asyncio.TimeoutError:
+        d["wallet_note"] = "Balance check is slow. You can still choose wallets."
+        log.info("wallet balance check timed out; list stays open")
+    except Exception:
+        log.exception("wallet balance check failed")
+    try:
+        save_drafts()
+    except Exception:
+        log.exception("could not save the draft while opening wallets")
+    text, markup = _wallet_picker(did, d)
+    await _edit_or_send(None, chat_id, msg_id, text, markup, ctx)
 
 
 async def run_check(chat_id, ctx, did, msg_id=None):
@@ -5058,7 +5134,7 @@ async def cmd_send(update: Update, ctx):
             if a0 in seen0:
                 continue
             seen0.add(a0)
-            rows.append([B(f"{w['label']} ({wallets.mask(w['address'])})", callback_data=f"snd:src:{w['address']}")])
+            rows.append([addr_button(w["label"], w["address"], f"snd:src:{w['address']}")])
         ctx.user_data["send_wiz"] = {"step": "src"}
         await update.message.reply_text("send from which wallet?", reply_markup=M(rows))
         return

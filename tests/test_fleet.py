@@ -78,11 +78,12 @@ class Wallets(unittest.TestCase):
 
     def test_evm_mint_can_use_a_key_saved_on_another_evm_chain(self):
         wallets.add_wallet(3, KEY, 1, chain="ink")
-        self.assertEqual(wallets.signing_entries([3], chain="ethereum"), [])
-        found = wallets.signing_entries([3], chain="ethereum", evm_any=True)
+        found = wallets.signing_entries([3], chain="ethereum")
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0][2].lower(), wallets.address_of(KEY).lower())
-        self.assertEqual(wallets.signing_entries([3], chain="solana", evm_any=True), [])
+        self.assertEqual(wallets.signing_entries([3], chain="solana"), [])
+        with self.assertRaises(ValueError):
+            wallets.add_wallet(3, KEY, 1, chain="ethereum")
 
 
 class Fleet(unittest.TestCase):
@@ -163,6 +164,7 @@ class ZeroSendReason(unittest.TestCase):
         self.assertIn("no keys loaded", bot.zero_send_reason([1], "ethereum", set(), 0))
         wallets.add_wallet(1, KEY, 1, chain="ethereum")
         r = bot.zero_send_reason([1], "robinhood", set(), 0)
-        self.assertIn("0 wallets on robinhood", r)
-        self.assertIn("ethereum", r)
+        self.assertNotIn("0 wallets on robinhood", r)
+        sol = bot.zero_send_reason([1], "solana", set(), 0)
+        self.assertIn("0 wallets on solana", sol)
         self.assertTrue(bot.zero_send_reason([1], "ethereum", set(), 0))

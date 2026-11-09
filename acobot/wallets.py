@@ -22,8 +22,10 @@ _lock = threading.Lock()
 
 
 def supports_chain(wallet_chain, requested_chain):
-    """Wallets stay scoped to the selected supported network."""
-    return wallet_chain == requested_chain
+    """An EVM key works on every EVM chain. Solana stays on Solana."""
+    if wallet_chain == requested_chain:
+        return True
+    return wallet_chain in EVM_CHAINS and requested_chain in EVM_CHAINS
 
 
 def mask(addr):
@@ -74,7 +76,8 @@ def _save(data):
 
 
 def count(user_id):
-    return len(_load().get(str(user_id), []))
+    entries = _load().get(str(user_id), [])
+    return len({e["address"].lower() for e in entries})
 
 
 def add_wallet(user_id, priv_hex, qty=1, chain="ethereum"):
@@ -86,14 +89,17 @@ def add_wallet(user_id, priv_hex, qty=1, chain="ethereum"):
     with _lock:
         data = _load()
         entries = data.setdefault(str(user_id), [])
-        if len(entries) >= MAX_WALLETS:
-            raise ValueError(f"you already have {MAX_WALLETS} wallets (the cap). remove one first")
-        if any(e["address"].lower() == addr.lower() and e.get("chain", "ethereum") == chain for e in entries):
+        same = [e for e in entries if e["address"].lower() == addr.lower()]
+        if any(e.get("chain", "ethereum") == chain or
+               (chain in EVM_CHAINS and e.get("chain", "ethereum") in EVM_CHAINS) for e in same):
             raise ValueError("that wallet is already saved on this chain")
+        unique = {e["address"].lower() for e in entries}
+        if addr.lower() not in unique and len(unique) >= MAX_WALLETS:
+            raise ValueError(f"you already have {MAX_WALLETS} wallets (the cap). remove one first")
         entries.append({"address": addr, "qty": int(qty), "chain": chain,
                         "enc_key": f.encrypt(key_to_encrypt.encode()).decode()})
         _save(data)
-        label = f"Wallet {len(entries)}"
+        label = f"Wallet {len(unique) + (0 if addr.lower() in unique else 1)}"
     return addr, mask(addr), label
 
 
@@ -110,10 +116,23 @@ def list_wallets(user_id):
     if not any(e["address"].lower() == (main or "").lower() for e in entries):
         main = entries[0]["address"] if entries else None
     out = []
-    for i, e in enumerate(entries):
-        out.append({"label": f"Wallet {i + 1}", "address": e["address"], "masked": mask(e["address"]),
-                    "qty": e.get("qty", 1), "chain": e.get("chain", "ethereum"),
-                    "main": bool(main) and e["address"].lower() == main.lower()})
+    seen = {}
+    for e in entries:
+        key = e["address"].lower()
+        chain = e.get("chain", "ethereum")
+        if key in seen:
+            row = seen[key]
+            if chain not in row["chains"]:
+                row["chains"].append(chain)
+            row["qty"] = max(int(row["qty"]), int(e.get("qty", 1)))
+            continue
+        row = {"address": e["address"], "masked": mask(e["address"]),
+               "qty": e.get("qty", 1), "chain": chain, "chains": [chain],
+               "main": bool(main) and key == main.lower()}
+        seen[key] = row
+        out.append(row)
+    for i, row in enumerate(out):
+        row["label"] = f"Wallet {i + 1}"
     return out
 
 
@@ -123,15 +142,14 @@ def main_wallet(user_id):
 
 
 def main_wallet_for(user_id, chain):
-    """Main wallet usable on `chain`: an entry saved on that exact chain, else
-    the starred main if it's an EVM wallet (same key/address works on every EVM chain)."""
+    """Starred wallet if it can sign on `chain`, otherwise the first wallet that can."""
     ws = list_wallets(user_id)
     for w in ws:
-        if w["chain"] == chain:
+        if w["main"] and supports_chain(w["chain"], chain):
             return w
-    m = next((w for w in ws if w["main"]), None)
-    if m and m["chain"] in EVM_CHAINS and chain in EVM_CHAINS:
-        return m
+    for w in ws:
+        if supports_chain(w["chain"], chain):
+            return w
     return None
 
 
@@ -167,10 +185,14 @@ def chain_map(user_id):
 def set_qty(user_id, address, qty):
     with _lock:
         data = _load()
+        hit = False
         for e in data.get(str(user_id), []):
             if e["address"].lower() == address.lower():
-                e["qty"] = int(qty); _save(data); return True
-    return False
+                e["qty"] = int(qty)
+                hit = True
+        if hit:
+            _save(data)
+        return hit
 
 
 def remove_wallet(user_id, address):
@@ -199,7 +221,7 @@ def signing_entries(user_ids, only=None, chain=None, evm_any=False):
     data = _load()
     DECRYPT_FAILS.clear()
     for uid in user_ids:
-        for i, e in enumerate(data.get(str(uid), [])):
+        for e in data.get(str(uid), []):
             entry_chain = e.get("chain", "ethereum")
             if chain is not None and not supports_chain(entry_chain, chain):
                 if not (evm_any and entry_chain in EVM_CHAINS and chain in EVM_CHAINS):
@@ -215,7 +237,7 @@ def signing_entries(user_ids, only=None, chain=None, evm_any=False):
                 DECRYPT_FAILS.append(mask(e["address"]))
                 continue
             seen.add(identity)
-            out.append((uid, f"Wallet {i + 1}", e["address"], key, e.get("qty", 1)))
+            out.append((uid, f"Wallet {len(out) + 1}", e["address"], key, e.get("qty", 1)))
     return out
 
 
