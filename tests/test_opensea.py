@@ -279,6 +279,32 @@ class T4(unittest.TestCase):
         self.assertIn("public", text)
         self.assertIn("allowlist", text)
 
+    def test_fee_marker_is_escaped_for_telegram_html(self):
+        draft = {
+            "contract": "0x" + "12" * 20,
+            "chain": "ethereum",
+            "name": "JPEGZ",
+            "price_wei": 0,
+            "per_wallet": 2,
+            "phase": "public",
+            "gas_limit": "auto",
+            "speed": "fast",
+            "fees": {
+                "rows": {
+                    "slow": {"label": "Slow", "cost_eth": 0.0003},
+                    "medium": {"label": "Medium", "cost_eth": 0.0004},
+                    "fast": {"label": "Fast", "cost_eth": 0.0007},
+                    "superfast": {"label": "Super Fast", "cost_eth": 0.0018},
+                }
+            },
+            "usd_per_eth": 2000,
+        }
+        text = bot.draft_text(draft)
+        pre = text.split("<pre>", 1)[1].split("</pre>", 1)[0]
+        self.assertIn("&gt; ⚡ Fast", pre)
+        self.assertNotIn(">", pre)
+        self.assertNotIn("<", pre)
+
     def test_phase_statuses(self):
         now = int(time.time())
         self.assertEqual(bot._phase_status(now - 120, now - 60), "ended")

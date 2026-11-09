@@ -700,7 +700,8 @@ def draft_text(d):
     lines += ["", "<b>⛽ GAS</b>", f"limit: {esc(gas_s)}"]
     hint_key = "auto" if gas in (None, "auto") else ("high" if int(gas) == 500000 else "custom")
     lines.append("<i>" + esc(GAS_HINT[hint_key]) + "</i>")
-    lines.append("<pre>" + "\n".join(fee_block(d)) + "</pre>")
+    # Telegram HTML rejects a bare ">" (the selected-speed marker) inside <pre>.
+    lines.append("<pre>" + esc("\n".join(fee_block(d))) + "</pre>")
     if d.get("speed") == "superfast":
         lines.append("🚀 super fast: top tier, no gas cap. it spends what it takes to land in the first block.")
     fm = d.get("fire_mode", "dual")
@@ -1257,9 +1258,17 @@ async def start_draft(chat_id, ctx, contract, chain_name=None):
     did = max(DRAFTS.keys(), default=0) + 1
     DRAFTS[did] = d
     save_drafts()
-    await ctx.bot.send_message(chat_id, draft_text(d), reply_markup=draft_kb(did, d))
+    panel = draft_text(d)
+    markup = draft_kb(did, d)
+    try:
+        await ctx.bot.send_message(chat_id, panel, reply_markup=markup)
+    except BadRequest as exc:
+        if "parse" not in str(exc).lower() and "entity" not in str(exc).lower():
+            raise
+        log.warning("mint panel rejected as HTML: %s", exc)
+        await ctx.bot.send_message(chat_id, esc(panel), reply_markup=markup)
     if not d.get("mint_sig") and not d.get("seadrop"):
-        await ctx.bot.send_message(chat_id, "no mint call found on this contract. want me to dig the web for the real mint contract? say 'dig <project name>'.")
+        await ctx.bot.send_message(chat_id, "no mint call found on this contract. want me to dig the web for the real mint contract? say dig and the project name.")
 
 
 def _safe_send(chat_id, ctx, text):
