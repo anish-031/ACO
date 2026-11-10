@@ -1016,6 +1016,91 @@ async def send_panel(bot, chat_id, text, reply_markup=None):
         return await bot.send_message(chat_id, plain_panel(text), reply_markup=reply_markup)
 
 
+def wallet_count_keyboard(chain_pick):
+    """One tap creates that many wallets. Typing a number still works too."""
+    return M([[B(n, callback_data=f"wgenn:{chain_pick}:{n}") for n in ("1", "2", "5", "10")],
+              [B("cancel", callback_data="w:list")]])
+
+
+def create_wallets(uid, chain_arg, asked):
+    """Generate and save wallets. Returns (saved pairs, error, scope)."""
+    if chain_arg != "evm_all" and chain_arg not in wallets.CHAINS:
+        raise ValueError("unknown chain")
+    chain_pick = "ethereum" if chain_arg == "evm_all" else (chain_arg or "ethereum")
+    scope = "all EVM chains" if chain_arg == "evm_all" else chain_pick
+    try:
+        room = wallets.MAX_WALLETS - wallets.count(uid)
+    except RuntimeError as exc:
+        return [], str(exc), scope
+    if room <= 0:
+        return [], f"wallet cap ({wallets.MAX_WALLETS}) reached. remove one first.", scope
+    saved, error = [], None
+    for _ in range(min(int(asked), room)):
+        try:
+            priv, addr = wallets.generate_wallet(chain_pick)
+            wallets.add_wallet(uid, priv, 1, chain_pick)
+            if chain_pick != "solana" and not str(priv).startswith("0x"):
+                priv = "0x" + priv
+            saved.append((addr, priv))
+        except ValueError as exc:
+            error = str(exc)
+            break
+        except Exception as exc:
+            log.exception("wallet generate failed")
+            error = f"could not save a wallet ({type(exc).__name__}: {exc})"
+            break
+    return saved, error, scope
+
+
+async def deliver_generated_wallets(chat_id, ctx, uid, chain_arg, asked):
+    """Create wallets and send the keys in a new message, never as a reply to a deleted one."""
+    try:
+        asked = int(asked)
+    except (TypeError, ValueError):
+        await ctx.bot.send_message(chat_id, "send a number 1-10.")
+        return
+    if not 1 <= asked <= 10:
+        await ctx.bot.send_message(chat_id, "send a number 1-10.")
+        return
+    try:
+        saved, error, scope = await asyncio.to_thread(create_wallets, uid, chain_arg, asked)
+    except Exception as exc:
+        log.exception("wallet generate failed")
+        await ctx.bot.send_message(chat_id, f"could not generate a wallet ({type(exc).__name__}: {exc})")
+        return
+    if not saved:
+        await ctx.bot.send_message(chat_id, error or "no wallet was generated. try again or /cancel.")
+        return
+    await send_wallet_text(ctx, chat_id, wallet_key_reveal(saved, asked, error, scope))
+    try:
+        await show_wallets(chat_id, ctx, uid)
+    except Exception:
+        log.exception("wallet list after generate failed")
+
+
+def wallet_key_reveal(saved, asked, error, scope):
+    note = f"saved {len(saved)} of {asked}. {error}" if error or len(saved) != asked else f"saved {len(saved)}."
+    lines = [f"<code>{esc(addr)}</code>\n<code>{esc(priv)}</code>" for addr, priv in saved]
+    return (
+        f"🛡 {esc(note)} New {esc(scope)} wallet(s). One EVM key works on Ethereum, Robinhood, and Ink.\n\n"
+        + "\n\n".join(lines)
+        + "\n\n⚠️ this is the ONLY time the keys are shown. save them somewhere safe now."
+    )
+
+
+async def send_wallet_text(ctx, chat_id, text):
+    """Send a wallet message. A rejected HTML message is sent again as plain text, keys included."""
+    body = str(text or "")
+    try:
+        await ctx.bot.send_message(chat_id, body[:4000])
+        return
+    except BadRequest as exc:
+        log.warning("wallet HTML rejected: %s", exc)
+    except Exception:
+        log.exception("wallet message failed")
+    await ctx.bot.send_message(chat_id, plain_panel(body)[:3900] or "wallet update failed.")
+
+
 async def _edit_panel(q, text, reply_markup=None):
     """Edit the tapped panel in place. Re-tapping the current selection sends the same text,
     which Telegram rejects as 'not modified'. That is not an error."""
@@ -2079,6 +2164,7 @@ async def on_callback(update: Update, ctx):
         await show_wallets(chat_id, ctx, uid, q.message.message_id)
     elif data == "wgen" or data.startswith("wgen:"):
         if q.message.chat.type != ChatType.PRIVATE:
+            await ctx.bot.send_message(chat_id, "dm me to generate a wallet.")
             return
         if len(wallets.list_wallets(uid)) >= wallets.MAX_WALLETS:
             await ctx.bot.send_message(chat_id, f"you have {wallets.MAX_WALLETS} wallets (the cap). remove one first.")
@@ -2088,7 +2174,22 @@ async def on_callback(update: Update, ctx):
             return
         label_txt = "EVM (one key, all chains)" if chain_pick == "evm_all" else chain_pick
         ctx.user_data["await"] = ("wgen_qty", chain_pick)
-        await ctx.bot.send_message(chat_id, f"how many {label_txt} wallets to generate? send a number (1-10). /cancel to abort.")
+        await ctx.bot.send_message(
+            chat_id,
+            f"how many {label_txt} wallets? tap a number or send 1-10. /cancel to abort.",
+            reply_markup=wallet_count_keyboard(chain_pick))
+    elif data.startswith("wgenn:"):
+        if q.message.chat.type != ChatType.PRIVATE:
+            await ctx.bot.send_message(chat_id, "dm me to generate a wallet.")
+            return
+        parts = data.split(":")
+        if len(parts) != 3 or not parts[2].isdigit():
+            return
+        _, chain_pick, count = parts
+        if chain_pick != "evm_all" and chain_pick not in wallets.CHAINS:
+            return
+        ctx.user_data.pop("await", None)
+        await deliver_generated_wallets(chat_id, ctx, uid, chain_pick, int(count))
     elif data == "w:add":
         if q.message.chat.type != ChatType.PRIVATE:
             await ctx.bot.send_message(chat_id, "dm me to add a wallet.")
@@ -2118,11 +2219,16 @@ async def on_callback(update: Update, ctx):
     elif data.startswith("wimp:"):
         chain_pick = data[5:]
         if q.message.chat.type != ChatType.PRIVATE or (chain_pick != "evm_all" and chain_pick not in wallets.CHAINS):
+            await ctx.bot.send_message(chat_id, "dm me to import a wallet.")
             return
-        kb = M([[B("single wallet", callback_data=f"wimp1:{chain_pick}"),
-                 B("multiple wallets", callback_data=f"wimpN:{chain_pick}")],
-                [B("back", callback_data="w:add")]])
-        await ctx.bot.send_message(chat_id, "add one wallet or many at once?", reply_markup=kb)
+        ctx.user_data["await"] = ("wallet_key", chain_pick)
+        label_txt = "EVM" if chain_pick == "evm_all" else chain_pick
+        await ctx.bot.send_message(
+            chat_id,
+            f"paste one {label_txt} private key in this dm. a 0x key, 64 hex characters, or a 12/24 word seed all work. "
+            "the message is deleted after it is saved. /cancel to abort.",
+            reply_markup=M([[B("multiple wallets", callback_data=f"wimpN:{chain_pick}")],
+                            [B("cancel", callback_data="w:list")]]))
     elif data.startswith("wimp1:"):
         chain_pick = data[6:]
         if q.message.chat.type != ChatType.PRIVATE or (chain_pick != "evm_all" and chain_pick not in wallets.CHAINS):
@@ -3152,56 +3258,14 @@ async def on_text(update: Update, ctx):
         if not is_dm(update):
             return
         if not text.isdigit() or not 1 <= int(text) <= 10:
-            await update.message.reply_text("send a number 1-10, or /cancel.")
+            await update.message.reply_text("send a number 1-10, or tap a number button. /cancel to abort.")
             return
-        asked = int(text)
         ctx.user_data.pop("await", None)
-        chain_pick = "ethereum" if arg == "evm_all" else (arg or "ethereum")
-        scope = "all EVM chains" if arg == "evm_all" else chain_pick
-        room = wallets.MAX_WALLETS - wallets.count(uid)
-        if room <= 0:
-            await update.message.reply_text(f"wallet cap ({wallets.MAX_WALLETS}) reached. remove one first.")
-            return
-        n = min(asked, room)
+        await deliver_generated_wallets(update.effective_chat.id, ctx, uid, arg, int(text))
         try:
             await update.message.delete()
         except Exception:
             pass
-        saved, error = [], None
-        for _ in range(n):
-            try:
-                priv, addr = await asyncio.to_thread(wallets.generate_wallet, chain_pick)
-                await asyncio.to_thread(wallets.add_wallet, uid, priv, 1, chain_pick)
-                saved.append((addr, priv))
-            except ValueError as exc:
-                error = str(exc)
-                break
-            except Exception as exc:
-                log.exception("wallet generate failed")
-                error = f"could not save a wallet ({type(exc).__name__})"
-                break
-        if not saved:
-            await update.message.reply_text(error or "no wallet was generated. try again or /cancel.")
-            return
-        lines = [f"<code>{esc(addr)}</code> → <code>{esc(priv)}</code>" for addr, priv in saved]
-        note = f"saved {len(saved)} of {asked}. {error}" if error or len(saved) != asked else f"saved {len(saved)}."
-        reveal = (
-            f"🛡 {esc(note)} New {esc(scope)} wallet(s). One key works on every EVM chain.\n\n"
-            + "\n".join(lines)
-            + "\n\n⚠️ this is the ONLY time the keys are shown. save them somewhere safe now."
-        )
-        try:
-            await update.message.reply_text(reveal[:4000])
-        except Exception:
-            log.exception("wallet key reveal failed")
-            await ctx.bot.send_message(
-                update.effective_chat.id,
-                "Wallets were saved, but Telegram rejected the key message. "
-                "Remove them in /wallets and generate again, then copy the keys immediately.")
-        try:
-            await show_wallets(update.effective_chat.id, ctx, uid)
-        except Exception:
-            log.exception("wallet list after generate failed")
         return
     if field == "wallet_multi_count":
         if not text.isdigit() or not (2 <= int(text) <= 20):
@@ -3229,7 +3293,10 @@ async def on_text(update: Update, ctx):
                 _addr, masked, _label = await asyncio.to_thread(wallets.add_wallet, uid, k, 1, store_chain)
                 saved.append(masked)
             except (ValueError, RuntimeError) as e:
-                failed.append(str(e)[:80])
+                failed.append(str(e)[:120])
+            except Exception as e:
+                log.exception("wallet import failed")
+                failed.append(f"{type(e).__name__}: {e}"[:120])
         ctx.user_data.pop("await", None)
         try:
             await update.message.delete()
@@ -3239,7 +3306,7 @@ async def on_text(update: Update, ctx):
         msg = f"added {len(saved)} wallet(s) for {scope}:\n" + "\n".join(esc(item) for item in saved)
         if failed:
             msg += "\n\n" + f"{len(failed)} failed:\n" + "\n".join(esc(item) for item in failed[:5])
-        await ctx.bot.send_message(update.effective_chat.id, msg[:4000])
+        await send_wallet_text(ctx, update.effective_chat.id, msg)
         try:
             await show_wallets(update.effective_chat.id, ctx, uid)
         except Exception:
@@ -3257,14 +3324,19 @@ async def on_text(update: Update, ctx):
         except RuntimeError as e:
             await update.message.reply_text(f"cant store keys right now: {e}")
             return
+        except Exception as e:
+            log.exception("wallet import failed")
+            await update.message.reply_text(
+                f"could not import that key ({type(e).__name__}: {e}). send it again or /cancel.")
+            return
         ctx.user_data.pop("await", None)
         try:
             await update.message.delete()
         except Exception:
             pass
         scope = "every EVM chain" if arg == "evm_all" or store_chain in wallets.EVM_CHAINS else store_chain
-        await ctx.bot.send_message(
-            update.effective_chat.id,
+        await send_wallet_text(
+            ctx, update.effective_chat.id,
             f"saved {esc(label)} {esc(masked)} for {esc(scope)}. set the mint amount in /wallets.")
         try:
             await show_wallets(update.effective_chat.id, ctx, uid)

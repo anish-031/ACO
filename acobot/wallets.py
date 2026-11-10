@@ -35,24 +35,57 @@ def mask(addr):
 
 
 def validate_key(text):
-    return bool(PRIV_RE.match(text.strip()))
+    return bool(PRIV_RE.match(str(text or "").strip()))
 
 
 def address_of(priv_hex):
-    p = priv_hex.strip()
+    p = str(priv_hex).strip()
     p = p if p.startswith("0x") else "0x" + p
     return Account.from_key(p).address
 
 
-def _address_and_key(secret, chain):
+def normalize_secret(secret, chain):
+    """Pull one private key out of a pasted message.
+
+    Accepts a bare key, a quoted key, a key buried in other text, a 12/24 word
+    seed, and a Solana base58 key or byte array.
+    """
+    text = str(secret or "").strip()
+    if not text:
+        raise ValueError("paste a private key")
     if chain == "solana":
         from acobot import solana
-        if not solana.validate_secret(secret):
-            raise ValueError("not a valid Solana private key")
-        return solana.public_key(secret), secret.strip()
-    if not validate_key(secret):
-        raise ValueError("not a valid private key")
-    return address_of(secret), secret.strip()
+        if "[" in text and "]" in text:
+            blob = text[text.find("["):text.rfind("]") + 1]
+            if solana.validate_secret(blob):
+                return blob
+        for token in text.replace(",", " ").replace("\n", " ").split():
+            token = token.strip().strip("`").strip('"').strip("'")
+            if token and solana.validate_secret(token):
+                return token
+        raise ValueError("not a valid Solana private key")
+    compact = text.replace("\n", " ")
+    words = [word.strip("`,.\"'").lower() for word in compact.split() if word.strip("`,.\"'")]
+    if len(words) in (12, 15, 18, 21, 24) and all(re.fullmatch(r"[a-z]+", word) for word in words):
+        Account.enable_unaudited_hdwallet_features()
+        try:
+            account = Account.from_mnemonic(" ".join(words))
+        except Exception as exc:
+            raise ValueError("that seed phrase could not be read") from exc
+        priv = account.key.hex()
+        return priv if priv.startswith("0x") else "0x" + priv
+    match = re.search(r"(?i)(?<![0-9a-f])(?:0x)?([0-9a-f]{64})(?![0-9a-f])", text)
+    if not match:
+        raise ValueError("not a valid private key. paste the 0x key or the 12/24 word seed")
+    return "0x" + match.group(1)
+
+
+def _address_and_key(secret, chain):
+    secret = normalize_secret(secret, chain)
+    if chain == "solana":
+        from acobot import solana
+        return solana.public_key(secret), secret
+    return address_of(secret), secret
 
 
 def _fernet():
@@ -67,7 +100,15 @@ def _fernet():
 
 
 def _load():
-    return json.loads(STORE.read_text()) if STORE.exists() else {}
+    if not STORE.exists():
+        return {}
+    try:
+        data = json.loads(STORE.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"wallet file could not be read ({type(exc).__name__})") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("wallet file could not be read")
+    return data
 
 
 def _save(data):

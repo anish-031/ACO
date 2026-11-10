@@ -56,9 +56,10 @@ class WalletFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(wallets.signing_entries([uid], chain="robinhood")), made)
                 self.assertEqual(len(wallets.signing_entries([uid], chain="ink")), made)
                 self.assertEqual(wallets.signing_entries([uid], chain="solana"), [])
-                reveal = update.message.reply_text.await_args.args[0]
+                reveal = ctx.bot.send_message.await_args.args[1]
                 self.assertIn(f"saved {made}", reveal)
                 self.assertNotIn("of " + str(made), reveal)
+                self.assertIn("0x", reveal)
 
     async def test_solana_generate_saves_a_key_the_bot_can_sign_with(self):
         for run in range(RUNS):
@@ -80,7 +81,7 @@ class WalletFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(solana.public_key(secret), address)
                 self.assertEqual(qty, 1)
                 self.assertEqual(wallets.signing_entries([uid], chain="ethereum"), [])
-                reveal = update.message.reply_text.await_args.args[0]
+                reveal = ctx.bot.send_message.await_args.args[1]
                 self.assertIn("saved 1.", reveal)
                 self.assertIn(address, reveal)
 
@@ -105,6 +106,57 @@ class WalletFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(wallets.count(uid), 1)
                 self.assertIn("already saved", again.message.reply_text.await_args.args[0])
                 self.assertEqual(ctx.user_data.get("await"), ("wallet_key", "ethereum"))
+
+    async def test_import_accepts_a_key_inside_other_text_and_a_seed_phrase(self):
+        phrase = "test test test test test test test test test test test junk"
+        for run in range(RUNS):
+            with self.subTest(run=run):
+                _store(self)
+                uid = 500 + run
+                ctx = SimpleNamespace(
+                    user_data={"await": ("wallet_key", "evm_all")},
+                    bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1))),
+                )
+                wrapped = _update(f"here is the key {KEY} thanks", uid)
+                with patch.object(bot, "show_wallets", new=AsyncMock()):
+                    await bot.on_text(wrapped, ctx)
+                self.assertEqual(wallets.count(uid), 1)
+                _store(self)
+                ctx.user_data["await"] = ("wallet_key", "evm_all")
+                seeded = _update(phrase, uid)
+                with patch.object(bot, "show_wallets", new=AsyncMock()):
+                    await bot.on_text(seeded, ctx)
+                self.assertEqual(wallets.count(uid), 1)
+                self.assertEqual(
+                    wallets.list_wallets(uid)[0]["address"],
+                    "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
+
+    async def test_generate_button_saves_and_sends_the_key(self):
+        for run in range(RUNS):
+            with self.subTest(run=run):
+                _store(self)
+                uid = bot.ADMIN_ID
+                sent = []
+
+                async def send_message(chat_id, text=None, reply_markup=None, **_kwargs):
+                    sent.append(text)
+                    return SimpleNamespace(message_id=len(sent))
+
+                ctx = SimpleNamespace(user_data={"await": ("wgen_qty", "evm_all")}, bot=SimpleNamespace(send_message=send_message))
+                query = SimpleNamespace(
+                    answer=AsyncMock(),
+                    from_user=SimpleNamespace(id=uid, username=None),
+                    data="wgenn:evm_all:1",
+                    message=SimpleNamespace(
+                        chat_id=uid, message_id=2, chat=SimpleNamespace(type=ChatType.PRIVATE)),
+                )
+                with patch.object(bot, "allowed", return_value=True), \
+                        patch.object(bot, "username_allowed", return_value=False), \
+                        patch.object(bot, "show_wallets", new=AsyncMock()):
+                    await bot.on_callback(SimpleNamespace(callback_query=query), ctx)
+                self.assertEqual(wallets.count(uid), 1)
+                self.assertIsNone(ctx.user_data.get("await"))
+                self.assertTrue(any("saved 1." in (text or "") and "0x" in (text or "") for text in sent))
 
     async def test_import_rejects_a_bad_key_and_keeps_the_prompt(self):
         for run in range(RUNS):
