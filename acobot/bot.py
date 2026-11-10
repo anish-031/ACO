@@ -6356,6 +6356,8 @@ def build_app():
 
 def main():
     global CFG
+    from acobot import deps
+    deps.ensure()
     load_env()
     CFG = cfgmod.load(str(HOME / "config.toml"))
     from acobot import solana

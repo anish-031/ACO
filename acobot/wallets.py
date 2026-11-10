@@ -92,7 +92,12 @@ def _fernet():
     try:
         from cryptography.fernet import Fernet
     except ImportError:
-        raise RuntimeError("cryptography not installed; refusing to store keys in plaintext")
+        from acobot import deps
+        deps.ensure()
+        try:
+            from cryptography.fernet import Fernet
+        except ImportError:
+            raise RuntimeError("cryptography not installed; refusing to store keys in plaintext")
     if not MASTER.exists():
         MASTER.write_bytes(Fernet.generate_key())
         os.chmod(MASTER, 0o600)
