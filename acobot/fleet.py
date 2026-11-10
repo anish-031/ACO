@@ -4,6 +4,7 @@ Read-only functions here never sign. Signing happens only in execute_* after the
 Keys are decrypted just before signing and never returned or logged.
 """
 import concurrent.futures as cf
+import time
 from acobot.rpc import RPC
 from eth_account import Account
 from eth_utils import keccak, to_checksum_address as cs
@@ -89,9 +90,17 @@ def check_wallet(rpc, chain, mint, addr, label, qty, fees=None):
     except Exception as exc:
         # pre-sale: eth_estimateGas reverts. use the research-based per-contract estimate (preview only)
         gas = sniper.static_gas(mint, qty)
-        if gated:
+        phase_open = True
+        try:
+            start_ts = int(mint.get("start_ts") or 0)
+            phase_open = not start_ts or int(time.time()) >= start_ts
+        except (TypeError, ValueError, OverflowError):
+            phase_open = True
+        if gated and phase_open:
             out["eligibility"] = False
-            issues.append(("fail", "allowlist check: the chain rejected this wallet's mint (not on the allowlist, or stage not open yet)"))
+            issues.append(("fail", "allowlist check: the chain rejected this wallet's mint (not on the allowlist)"))
+        elif gated:
+            out["eligibility"] = None
     if isinstance(mint.get("gas_limit"), int) and mint["gas_limit"] > 0:
         gas = max(gas, int(mint["gas_limit"]))
     if not estimated:

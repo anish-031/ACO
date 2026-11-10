@@ -60,8 +60,8 @@ def label_of(s):
 
 def wallet_step_lines(d, allw):
     """allw: [(owner, label, address, qty)]. Returns HTML lines for the select panel."""
-    excl = {a.lower() for a in (d.get("wex") or [])}
-    chosen = [w for w in allw if w[2].lower() not in excl]
+    excl = {str(a).lower() for a in (d.get("wex") or [])}
+    chosen = [w for w in allw if str(w[2]).lower() not in excl]
     lines = [f"🎯 <b>{esc(d.get('name') or 'mint')}</b> on {esc(d.get('chain', 'ethereum'))}",
              f"<code>{esc(d.get('contract', ''))}</code>", ""]
     if not allw:
@@ -70,7 +70,7 @@ def wallet_step_lines(d, allw):
         n = len(chosen)
         lines.append(f"<b>minting from {n} wallet{'s' if n != 1 else ''}</b> (of {len(allw)} on this chain)")
         for owner, label, addr, qty in allw:
-            mark = "✅" if addr.lower() not in excl else "⬜"
+            mark = "✅" if str(addr).lower() not in excl else "⬜"
             lines.append(f"{mark} {esc(label)} {esc(mask(addr))}  x{qty}")
     return lines
 
@@ -254,7 +254,7 @@ def preflight_lines(verdicts, gated=False):
             out.append(f"    • ⚠️ {esc(reason)}")
     failures = [v for v in verdicts if v.get("reasons") or v.get("reason") not in (None, "ready") or v.get("verdict") in ("warn", "fail")]
     if failures:
-        out += ["", "⚠️ review the listed wallets. force mint is required to proceed with any warning or failed check."]
+        out += ["", "⚠️ review the listed wallets. confirming still attempts every selected wallet."]
     elif gated:
         out += ["", "⚠️ gated stage: eligibility must be verified before scheduling"]
     return out

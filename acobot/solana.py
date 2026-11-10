@@ -253,10 +253,21 @@ def keypair_from_secret(secret):
     raise ValueError("Solana secret key must decode to 32 or 64 bytes")
 
 
+def _b58encode(data):
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    number = int.from_bytes(data, "big")
+    encoded = ""
+    while number:
+        number, remainder = divmod(number, 58)
+        encoded = alphabet[remainder] + encoded
+    return "1" * (len(data) - len(data.lstrip(b"\x00"))) + encoded
+
+
 def generate_wallet():
+    """Fresh Solana key. The secret is the 64-byte keypair, base58, which import already accepts."""
     from solders.keypair import Keypair
     kp = Keypair()
-    return kp.to_base58_string(), str(kp.pubkey())
+    return _b58encode(bytes(kp)), str(kp.pubkey())
 
 
 def public_key(secret):

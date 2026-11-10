@@ -70,7 +70,7 @@ def _when(ts):
 def panel_lines(rows, now=None):
     """Watchlist panel. Sorted by open time (unknown last). Plain text, no raw ids beyond contract tail."""
     if not rows:
-        return ["the watchlist is empty. admin can add a mint with /watchlist add <contract>."]
+        return ["the watchlist is empty. admin can add a mint with /watchlist add CONTRACT."]
     now = now or time.time()
     order = sorted(rows, key=lambda r: (r.get("opens_ts") is None, r.get("opens_ts") or 0))
     out = []

@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -10,16 +11,19 @@ WALLET_OTHER = "0x" + "22" * 20
 
 
 class ScheduleWorkflowTests(unittest.IsolatedAsyncioTestCase):
-    async def test_gated_eligibility_split_routes_unknown_and_ineligible_to_force(self):
+    async def test_gated_eligibility_split_keeps_unknown_and_drops_only_an_explicit_no(self):
+        wallet_no = "0x" + "44" * 20
         entries = [
             (bot.ADMIN_ID, "eligible", WALLET_ELIGIBLE, 1),
             (bot.ADMIN_ID, "unknown", WALLET_OTHER, 1),
+            (bot.ADMIN_ID, "miss", wallet_no, 1),
         ]
 
         async def probe_fleet(_contract, _chain, wallets, _stage):
             return [
                 (wallets[0], {"eligible": True}),
                 (wallets[1], {"eligible": None}),
+                (wallets[2], {"eligible": False}),
             ]
 
         draft = {
@@ -31,9 +35,29 @@ class ScheduleWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(eligible, "probe_fleet", new=probe_fleet):
             normal, force, results = await bot._split_by_local_eligibility(draft, entries)
 
-        self.assertEqual(normal, [entries[0]])
-        self.assertEqual(force, [entries[1]])
+        self.assertEqual(normal, [entries[0], entries[1]])
+        self.assertEqual(force, [entries[2]])
         self.assertIsNone(results[WALLET_OTHER.lower()]["eligible"])
+
+    async def test_slow_eligibility_probe_does_not_block_the_normal_schedule(self):
+        entries = [(bot.ADMIN_ID, "unknown", WALLET_OTHER, 1)]
+
+        async def hang(*_args, **_kwargs):
+            await asyncio.sleep(30)
+            return []
+
+        draft = {
+            "contract": "0x" + "33" * 20,
+            "chain": "ethereum",
+            "phase": "allowlist",
+            "gated": True,
+            "schedule": [{"chain_key": "allowlist", "gated": True}],
+        }
+        with mock.patch.object(eligible, "probe_fleet", new=hang), \
+                mock.patch.object(bot, "ELIGIBILITY_PROBE_TIMEOUT", 0.05):
+            normal, force, _results = await bot._split_by_local_eligibility(draft, entries)
+        self.assertEqual(normal, entries)
+        self.assertEqual(force, [])
 
     async def test_both_creates_disjoint_scheduled_workflows_at_phase_time(self):
         old_drafts, old_mints = dict(bot.DRAFTS), dict(bot.MINTS)
@@ -150,23 +174,33 @@ class ScheduleWorkflowTests(unittest.IsolatedAsyncioTestCase):
             bot._next_id[0] = old_next_id
             bot.mint_wallets = old_mint_wallets
 
-    def test_schedule_panel_keeps_all_three_workflows_visible(self):
+    def test_schedule_panel_shows_one_action_for_the_wallets(self):
+        future = int(__import__("time").time()) + 3600
         draft = {
             "contract": "0x" + "33" * 20,
             "chain": "ethereum",
             "phase": "allowlist",
             "gated": True,
-            "start_ts": 12345,
+            "start_ts": future,
+            "wallet_selected": 1,
+            "wallet_report": [{"verdict": "ok", "reasons": [], "eligibility": True}],
         }
         callbacks = [
             button.callback_data
             for row in bot.draft_kb(92, draft).inline_keyboard
             for button in row
         ]
-
         self.assertIn("dsched:92", callbacks)
-        self.assertIn("fsched:92", callbacks)
-        self.assertIn("bsched:92", callbacks)
-        self.assertIn("dfm:92:prefire", callbacks)
-        self.assertIn("dfm:92:normal", callbacks)
-        self.assertIn("dfm:92:dual", callbacks)
+        self.assertNotIn("fsched:92", callbacks)
+        self.assertNotIn("bsched:92", callbacks)
+
+        draft["wallet_report"] = [{"verdict": "warn", "eligibility": None,
+                                   "reasons": ["not enough for the mint fee"]}]
+        blocked = [
+            button.callback_data
+            for row in bot.draft_kb(92, draft).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("fsched:92", blocked)
+        self.assertNotIn("dsched:92", blocked)
+        self.assertNotIn("bsched:92", blocked)

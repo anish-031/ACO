@@ -47,6 +47,36 @@ class T4(unittest.TestCase):
         self.assertEqual(st[0]["start_ts"], 1793620800)
         self.assertEqual(st[-1]["end_ts"], 1793728800)
 
+    def test_wallet_limit_uses_max_total_and_visible_schedule_text(self):
+        html = (
+            '"dropBySlug":{"maxSupply":11111,"totalSupply":0,"stages":['
+            '{"label":"TREASURY","stageType":"SIGNED_PRESALE","stageIndex":1,'
+            '"startTime":"2026-11-11T16:00:00.000Z","endTime":"2026-11-11T16:11:00.000Z",'
+            '"maxTotalMintableByWallet":50,"price":{"token":{"unit":0}}},'
+            '{"label":"FREE TO CLAIM - FCFS","stageType":"SIGNED_PRESALE","stageIndex":3,'
+            '"startTime":"2026-11-11T19:11:00.000Z","endTime":"2026-11-12T19:11:00.000Z",'
+            '"price":{"token":{"unit":0}}}]}}'
+            '<span class="font-medium">FREE TO CLAIM - FCFS</span>'
+            '<span>Free | Limit 2 per wallet</span>'
+        )
+        stages = opensea.parse_stages(html)
+        self.assertEqual([stage["per_wallet"] for stage in stages], [50, 2])
+        self.assertEqual(stages[0]["drop_supply"], 11111)
+        self.assertEqual(stages[0]["drop_minted"], 0)
+        self.assertEqual(stages[1]["start_ts"], 1794424260)
+
+    def test_richer_stage_list_wins_when_both_have_the_same_count(self):
+        thin = (
+            '"stages":[{"label":"TREASURY","stageType":"SIGNED_PRESALE","stageIndex":1,'
+            '"startTime":"2026-11-11T16:00:00.000Z","price":{"token":{"unit":0}}}]'
+        )
+        rich = (
+            '"stages":[{"label":"TREASURY","stageType":"SIGNED_PRESALE","stageIndex":1,'
+            '"startTime":"2026-11-11T16:00:00.000Z","perWalletLimit":50,"price":{"token":{"unit":0}}}]'
+        )
+        self.assertEqual(opensea.parse_stages(thin + rich)[0]["per_wallet"], 50)
+        self.assertEqual(opensea.parse_stages(rich + thin)[0]["per_wallet"], 50)
+
     def test_parse_chooses_complete_stages_array_when_page_has_multiple(self):
         partial = (
             '{"dropBySlug":{"stages":[{"label":"Public only","stageType":"PUBLIC_SALE",'
@@ -163,13 +193,23 @@ class T4(unittest.TestCase):
         text = bot.draft_text(draft)
         for label in ("Team &amp; Treasury", "GTD (CCFF00", "WL/FCFS", "PUBLIC: 0 Goats left"):
             self.assertIn(label, text)
-        self.assertEqual(text.count("Status:"), 4)
-        self.assertIn("MP: FREE | Limit: 500 per wallet", text)
-        self.assertIn("MP: 0.002 ETH | Limit: 20 per wallet", text)
-        self.assertIn("Ends: 2026-11-03 18:00 UTC", text)
+        self.assertIn("500 per wallet", text)
+        self.assertIn("20 per wallet", text)
+        self.assertIn("Mint price: Free", text)
+        self.assertIn("0.002 ETH", text)
+        self.assertIn("Closes: 2026-11-03 18:00 UTC", text)
         self.assertIn("GMT+5:45", text)
         self.assertTrue(all(st["gated"] and not st["snipeable"] for st in schedule[:3]))
         self.assertTrue(schedule[-1]["snipeable"])
+        draft["phase"] = "public"
+        bot.select_initial_phase(draft)
+        self.assertEqual(draft["phase_idx"], 0)
+        selected = bot.draft_phase_view(draft)["_selected_stage"]["label"]
+        self.assertIn("Team", selected)
+        self.assertNotIn("PUBLIC", selected)
+        buttons = [button for row in bot.draft_kb(4, draft).inline_keyboard for button in row]
+        self.assertTrue(any(button.text.startswith("✅") and "Team" in button.text for button in buttons))
+        self.assertFalse(any(button.text.startswith("✅") and "PUBLIC" in button.text for button in buttons))
 
     def test_selecting_gtd_uses_its_display_terms_and_stays_gated(self):
         chain = [
@@ -209,22 +249,25 @@ class T4(unittest.TestCase):
         self.assertFalse(bot.draft_phase_snipeable(draft))
 
         text = bot.draft_text(draft)
-        self.assertIn("selected phase: <b>GTD (CCFF00", text)
-        self.assertIn("drop-page terms are display metadata; mint transaction comes from chain data or the official phase API", text)
+        self.assertIn("<b>GTD (CCFF00", text)
         self.assertIn("phase authorization: required", text)
         self.assertIn("missing wallet-specific Merkle proof, phase mint parameters", text)
         self.assertIn("quantity/cost: unavailable until the phase returns valid wallet authorization", text)
-        self.assertIn("price: <b>free</b>", text)
-        self.assertIn("per wallet: 2 per wallet", text)
-        self.assertIn("opens: <b>2026-11-02 12:30 UTC", text)
-        self.assertIn("mode: Normal only", text)
+        self.assertIn("Mint price: Free", text)
+        self.assertIn("Limit: 2 per wallet", text)
+        self.assertIn("Opens: 2026-11-02 12:30 UTC", text)
+        self.assertIn("Normal only", text)
         self.assertIn("GTD: guaranteed allowlist spot", text)
-        self.assertIn("discovered and simulated per wallet before/at execution", text)
+        self.assertIn("discovered and simulated per wallet before the phase opens", text)
 
+        draft["wallet_report"] = [{"verdict": "ok", "reasons": [], "eligibility": True}]
+        draft["wallet_selected"] = 1
         markup = bot.draft_kb(4, draft)
         buttons = [button for row in markup.inline_keyboard for button in row]
         self.assertTrue(any(button.callback_data == "dsched:4" for button in buttons))
-        self.assertTrue(any(button.callback_data == "fm:4" for button in buttons))
+        self.assertFalse(any(button.callback_data == "fm:4" for button in buttons))
+        self.assertFalse(any(button.callback_data == "fsched:4" for button in buttons))
+        self.assertFalse(any(button.callback_data == "bsched:4" for button in buttons))
         self.assertTrue(any(button.callback_data == "dfm:4:prefire" for button in buttons))
         self.assertTrue(any(button.callback_data == "dfm:4:normal" for button in buttons))
         self.assertTrue(any(button.callback_data == "dfm:4:dual" for button in buttons))
@@ -275,9 +318,35 @@ class T4(unittest.TestCase):
             "gas_limit": "auto",
         }
         text = bot.draft_text(draft)
-        self.assertIn("schedule unavailable (couldn&#x27;t read the drop page)", text)
+        self.assertIn("schedule unavailable (couldn't read the drop page)", text)
         self.assertIn("public", text)
         self.assertIn("allowlist", text)
+
+    def test_fee_marker_is_escaped_for_telegram_html(self):
+        draft = {
+            "contract": "0x" + "12" * 20,
+            "chain": "ethereum",
+            "name": "JPEGZ",
+            "price_wei": 0,
+            "per_wallet": 2,
+            "phase": "public",
+            "gas_limit": "auto",
+            "speed": "fast",
+            "fees": {
+                "rows": {
+                    "slow": {"label": "Slow", "cost_eth": 0.0003},
+                    "medium": {"label": "Medium", "cost_eth": 0.0004},
+                    "fast": {"label": "Fast", "cost_eth": 0.0007},
+                    "superfast": {"label": "Super Fast", "cost_eth": 0.0018},
+                }
+            },
+            "usd_per_eth": 2000,
+        }
+        text = bot.draft_text(draft)
+        self.assertIn("⚡", text)
+        self.assertNotIn("<pre>", text)
+        self.assertNotIn("&gt;", text)
+        self.assertNotIn(">", text.split("<b>")[0])
 
     def test_phase_statuses(self):
         now = int(time.time())
@@ -387,13 +456,20 @@ class GatedScheduleTests(unittest.IsolatedAsyncioTestCase):
         edit = AsyncMock()
         with patch.dict(bot.DRAFTS, {77: draft}, clear=True), \
                 patch.object(bot, "mint_wallets", return_value=entries), \
+                patch.object(bot, "_draft_checks", new=AsyncMock(return_value=(
+                    entries, [{"label": "Wallet 1", "address": entries[0][2], "verdict": "ok",
+                               "eligibility": None, "reasons": [], "balance_wei": 10**18}]))), \
                 patch.object(bot, "_edit_or_send", new=edit):
             await bot.show_wallet_step(123, ctx, 77)
         text, markup = edit.await_args.args[3:5]
         buttons = [button for row in markup.inline_keyboard for button in row]
-        self.assertIn("phase authorization: missing wallet-specific project signature", text)
-        self.assertFalse(any(button.callback_data == "wchk:77" for button in buttons))
-        self.assertTrue(any(button.callback_data == "wgo:77" for button in buttons))
+        self.assertIn("Wallet 1", text)
+        self.assertIn("minting from 1 wallet", text)
+        self.assertFalse(any(button.callback_data == "bsched:77" for button in buttons))
+        self.assertTrue(any(button.callback_data == "dsched:77" for button in buttons))
+        self.assertTrue(any(button.callback_data == "wt:77:0" for button in buttons))
+        self.assertTrue(any(button.callback_data == "wchk:77" for button in buttons))
+        self.assertTrue(all(len(button.text) <= 64 for button in buttons))
 
     async def test_legacy_eligibility_report_never_changes_wallet_selection(self):
         wallet = "0x" + "44" * 20
